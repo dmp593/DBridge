@@ -1,12 +1,19 @@
 import socket
-import threading
 import logging
 import os
+import threading
+from threading import Thread, Lock
+from time import sleep
 
-from forward import forward
+from forward import bidirectional
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+
+threads = []
+lock = Lock()
+
 
 PROXY_HOST = os.getenv("PROXY_HOST", "localhost")
 PROXY_PORT = int(os.getenv("PROXY_PORT", 3333))
@@ -15,49 +22,23 @@ DATABASE_HOST = os.getenv("DATABASE_HOST", "localhost")
 DATABASE_PORT = int(os.getenv("DATABASE_PORT", 3306))
 
 
-def handle_connection(proxy_socket):
-    db_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+def connect(host, port) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((host, port))
 
-    try:
-        db_socket.connect((DATABASE_HOST, DATABASE_PORT))
-        logging.info(f"Connected to database at {DATABASE_HOST}:{DATABASE_PORT}")
+    logging.info(f"Connected to server at {host}:{port}")
 
-        # Start bidirectional forwarding
-        t1 = threading.Thread(target=forward, args=(proxy_socket, db_socket))
-        t2 = threading.Thread(target=forward, args=(db_socket, proxy_socket))
+    return sock
 
-        t1.start()
-        t2.start()
 
-        # Wait for both threads to finish
-        t1.join()
-        t2.join()
-
-    except Exception as e:
-        logging.error(f"Error connecting to database: {e}")
-    finally:
-        proxy_socket.close()
-        db_socket.close()
+def start_forwarding(parent_thread=None):
+    proxy_server: socket.socket = connect(PROXY_HOST, PROXY_PORT)
+    db_server = connect(DATABASE_HOST, DATABASE_PORT)
+    bidirectional(proxy_server, db_server)
 
 
 def main():
-    proxy_socket = None
-
-    while True:
-        try:
-            proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            proxy_socket.connect((PROXY_HOST, PROXY_PORT))
-            logging.info(f"Connected to proxy server at {PROXY_HOST}:{PROXY_PORT}")
-
-            handle_connection(proxy_socket)
-
-            # Wait here until disconnected
-            threading.Event().wait()
-        except Exception as e:
-            logging.error(f"Connection error: {e}")
-
-            if proxy_socket:
-                proxy_socket.close()
+    start_forwarding()
 
 
 if __name__ == "__main__":

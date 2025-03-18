@@ -3,8 +3,7 @@ import random
 import threading
 import socket
 
-
-from forward import forward
+import forward
 
 
 HOST = '0.0.0.0'
@@ -38,12 +37,9 @@ def handle_client(conn, addr):
             conn.close()
             return
 
-        agents_conns = list(agents.keys())
-        agent_conn = random.choice(agents_conns)
+        agent_conn, agent_addr = agents.popitem()
 
-    # Start bidirectional forwarding threads
-    threading.Thread(target=forward, args=(conn, agent_conn)).start()
-    threading.Thread(target=forward, args=(agent_conn, conn)).start()
+    forward.bidirectional(conn, agent_conn)
 
 
 def websocker_server(host, port, handler):
