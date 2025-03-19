@@ -18,11 +18,8 @@ logging.basicConfig(
 )
 
 
-Stream = namedtuple('Stream', ['reader', 'writer'])
-
-
-listeners: list[Stream] = []
-agents: list[Stream] = []
+listeners: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+agents: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
 
 
 async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
@@ -43,44 +40,47 @@ async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWrite
 async def handle_listeners(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     logging.info("new listener connected")
 
-    listeners.append(
-        Stream(reader, writer)
-    )
+    listener = (reader, writer)
+    listeners.append(listener)
+
+    await writer.wait_closed()
+
+    if listener in listeners:
+        listeners.remove(listener)
 
 
 async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     logging.info("new agent connected")
 
-    agent = Stream(reader, writer)
+    agent = (reader, writer)
     agents.append(agent)
 
-    try:
-        await writer.wait_closed()
-    finally:
-        if agent in agents:
-            agents.remove(agent)
+    await writer.wait_closed()
+
+    if agent in agents:
+        agents.remove(agent)
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     logging.info("new client connected")
 
     if len(listeners) > 0:
-        listener: Stream = random.choice(listeners)
-        listener.writer.write(b'create_connection')
-        await listener.writer.drain()
+        (listener_reader, listener_writer) = random.choice(listeners)
+        listener_writer.write(b'create_connection')
+        await listener_writer.drain()
 
     if len(agents) == 0:
         writer.close()
         await writer.wait_closed()
 
-    agent = agents.pop()
+    (agent_reader, agent_writer) = agents.pop()
 
     await asyncio.gather(
         asyncio.create_task(
-            forward(agent.reader, writer),
+            forward(agent_reader, writer),
         ),
         asyncio.create_task(
-            forward(reader, agent.writer)
+            forward(reader, agent_writer)
         )
     )
 
