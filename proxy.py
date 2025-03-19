@@ -1,14 +1,15 @@
+import asyncio
 import logging
 import random
-import threading
-import socket
-
-import forward
+from collections import namedtuple
 
 
 HOST = '0.0.0.0'
-AGENT_PORT = 3333
-CLIENT_PORT = 4444
+
+
+PORT_NOTIFICATIONS = 8000
+PORT_CLIENTS_FWD = 3000
+PORT_AGENTS_FWD = 4000
 
 
 logging.basicConfig(
@@ -17,63 +18,94 @@ logging.basicConfig(
 )
 
 
-agents_lock = threading.Lock()
-agents: dict[socket.socket, tuple[str, int]] = {}
+Stream = namedtuple('Stream', ['reader', 'writer'])
 
 
-def handle_agent(conn: socket.socket, addr: tuple[str, int]):
-    print(f"New agent connected: {addr=}")
-
-    with agents_lock:  # Acquire the lock before adding a new agent connection
-        agents[conn] = addr
+listeners: list[Stream] = []
+agents: list[Stream] = []
 
 
-def handle_client(conn, addr):
-    logging.info(f"New client connected: {addr}")
-
-    with agents_lock:
-        if len(agents) == 0:
-            logging.error("No agent connected!")
-            conn.close()
-            return
-
-        agent_conn, agent_addr = agents.popitem()
-
-    forward.bidirectional(conn, agent_conn)
-
-
-def websocker_server(host, port, handler):
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((host, port))  # Bind server to port
-    server.listen()  # Listen for connections
-
-    print(f"Server listening on {host}:{port}")
-
-    while True:
-        conn, addr = server.accept()  # Accept a new client
-        thread = threading.Thread(target=handler, args=(conn, addr))
-        thread.start()
+async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
+    try:
+        while True:
+            data = await source.read(4096)
+            if not data:
+                break
+            destination.write(data)
+            await destination.drain()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        destination.close()
+        await destination.wait_closed()
 
 
-def create_websocket_server(host, port, handler):
-    thread_websocket_server = threading.Thread(target=websocker_server, args=(host, port, handler))
-    thread_websocket_server.start()
-    return thread_websocket_server
+async def handle_listeners(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    logging.info("new listener connected")
+
+    listeners.append(
+        Stream(reader, writer)
+    )
 
 
-def main():
-    thread_agent_websocket_server = create_websocket_server(HOST, AGENT_PORT, handle_agent)
-    thread_client_websocket_server = create_websocket_server(HOST, CLIENT_PORT, handle_client)
+async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    logging.info("new agent connected")
 
-    thread_client_websocket_server.join()
-    thread_agent_websocket_server.join()
+    agent = Stream(reader, writer)
+    agents.append(agent)
 
-    for agent_conn in agents:
-        agent_conn.close()
+    try:
+        await writer.wait_closed()
+    finally:
+        if agent in agents:
+            agents.remove(agent)
+
+
+async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    logging.info("new client connected")
+
+    if len(listeners) > 0:
+        listener: Stream = random.choice(listeners)
+        listener.writer.write(b'create_connection')
+        await listener.writer.drain()
+
+    if len(agents) == 0:
+        writer.close()
+        await writer.wait_closed()
+
+    agent = agents.pop()
+
+    await asyncio.gather(
+        asyncio.create_task(
+            forward(agent.reader, writer),
+        ),
+        asyncio.create_task(
+            forward(reader, agent.writer)
+        )
+    )
+
+async def run_forever(servers):
+    try:
+        # This keeps the event loop running indefinitely
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        # Handle the cleanup in case of cancellation
+        for server in servers:
+            server.close()
+            await server.wait_closed()
+
+
+async def main():
+    servers = await asyncio.gather(
+        asyncio.start_server(handle_listeners, HOST, PORT_NOTIFICATIONS),
+        asyncio.start_server(handle_agent, HOST, PORT_AGENTS_FWD),
+        asyncio.start_server(handle_client, HOST, PORT_CLIENTS_FWD)
+    )
+
+    logging.info("Proxy is running and listening on ports.")
+
+    await run_forever(servers)
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        logging.info("Shutting down server...")
+    asyncio.run(main())
