@@ -67,9 +67,17 @@ class State:
         token = token.decode()
 
         print(f"🎉 new forward stream (agent: {token})")
+        fw_stream = (reader, writer)
 
         async with self.lock:
-            self.agents[token].forwards.append((reader, writer))
+            self.agents[token].forwards.append(fw_stream)
+
+        while not reader.at_eof():
+            await asyncio.sleep(0.3)
+
+        async with self.lock:
+            print(f"🗑️ removing forward stream (agent: {token})")
+            self.agents[token].forwards.remove(fw_stream)
 
     async def pop_agent_forward_streams(self):
         async with self.lock:
@@ -129,6 +137,15 @@ async def handle_forward_client(reader: asyncio.StreamReader, writer: asyncio.St
 
 async def shutdown(loop, servers):
     logging.info(f"(𓌻‸𓌻) ᴜɢʜ...")
+
+    async with state.lock:
+        for token, agent in state.agents.items():
+            for (_, fw_writer) in agent.forwards:
+                fw_writer.close()
+                await fw_writer.wait_closed()
+
+            agent.writer.close()
+            await agent.writer.wait_closed()
 
     for server in servers:
         server.close()

@@ -53,7 +53,7 @@ async def handle_proxy_connection(token: str):
 
 async def run_agent(token: str):
     reader, writer = await asyncio.open_connection(PROXY_HOST, PROXY_PORT_AGENTS)
-    logging.info("三三ᕕ{ •̃_•̃ }ᕗ")
+    logging.info("三三ᕕ{ •̃_•̃ }ᕗ    ➤➤➤    %s" % token)
 
     writer.write(token.encode())  # send my identification token
     await writer.drain()
