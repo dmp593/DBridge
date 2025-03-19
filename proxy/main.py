@@ -1,21 +1,21 @@
 import asyncio
 import logging
 import random
-from collections import namedtuple
-
-
-HOST = '0.0.0.0'
-
-
-PORT_NOTIFICATIONS = 8000
-PORT_CLIENTS_FWD = 3000
-PORT_AGENTS_FWD = 4000
 
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(message)s"
 )
+
+
+HOST = '0.0.0.0'
+PORT_LISTENERS = 8000
+PORT_AGENTS = 4000
+PORT_CLIENTS = 3000
+
+
+notification_create_connection = b"create_connection"
 
 
 listeners: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
@@ -37,43 +37,35 @@ async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWrite
         await destination.wait_closed()
 
 
-async def handle_listeners(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    logging.info("new listener connected")
+async def save_connection(connections: list, connection: tuple[asyncio.StreamReader, asyncio.StreamWriter]):
+    connections.append(connection)
 
-    listener = (reader, writer)
-    listeners.append(listener)
+    try:
+        await connection[1].wait_closed()
+    finally:
+        if connection in connections:
+            connections.remove(connection)
 
-    await writer.wait_closed()
 
-    if listener in listeners:
-        listeners.remove(listener)
+async def handle_listener(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    await save_connection(listeners, (reader, writer))
 
 
 async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    logging.info("new agent connected")
-
-    agent = (reader, writer)
-    agents.append(agent)
-
-    await writer.wait_closed()
-
-    if agent in agents:
-        agents.remove(agent)
+    await save_connection(agents, (reader, writer))
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    logging.info("new client connected")
-
     if len(listeners) > 0:
         (listener_reader, listener_writer) = random.choice(listeners)
-        listener_writer.write(b'create_connection')
+        listener_writer.write(notification_create_connection)
         await listener_writer.drain()
 
     if len(agents) == 0:
         writer.close()
         await writer.wait_closed()
 
-    (agent_reader, agent_writer) = agents.pop()
+    (agent_reader, agent_writer) = agents.pop(0)
 
     await asyncio.gather(
         asyncio.create_task(
@@ -83,6 +75,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             forward(reader, agent_writer)
         )
     )
+
 
 async def run_forever(servers):
     try:
@@ -97,13 +90,12 @@ async def run_forever(servers):
 
 async def main():
     servers = await asyncio.gather(
-        asyncio.start_server(handle_listeners, HOST, PORT_NOTIFICATIONS),
-        asyncio.start_server(handle_agent, HOST, PORT_AGENTS_FWD),
-        asyncio.start_server(handle_client, HOST, PORT_CLIENTS_FWD)
+        asyncio.start_server(handle_listener, HOST, PORT_LISTENERS),
+        asyncio.start_server(handle_agent, HOST, PORT_AGENTS),
+        asyncio.start_server(handle_client, HOST, PORT_CLIENTS)
     )
 
-    logging.info("Proxy is running and listening on ports.")
-
+    logging.info("三三ᕕ( ᐛ )ᕗ")
     await run_forever(servers)
 
 
