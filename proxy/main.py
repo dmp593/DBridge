@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import random
-
+import signal
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,12 +88,44 @@ async def run_forever(servers):
             await server.wait_closed()
 
 
+async def shutdown(loop, servers):
+    logging.info(f"(𓌻‸𓌻) ᴜɢʜ...")
+
+    for listener in listeners:
+        listener[1].close()
+        await listener[1].wait_closed()
+
+    for agent in agents:
+        agent[1].close()
+        await agent[1].wait_closed()
+
+    for server in servers:
+        server.close()
+        await server.wait_closed()
+
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    loop.call_soon(loop.stop)
+
+
 async def main():
+    loop = asyncio.get_event_loop()
+
     servers = await asyncio.gather(
         asyncio.start_server(handle_listener, HOST, PORT_LISTENERS),
         asyncio.start_server(handle_agent, HOST, PORT_AGENTS),
         asyncio.start_server(handle_client, HOST, PORT_CLIENTS)
     )
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(
+            sig,
+            lambda: asyncio.create_task(shutdown(loop, servers))
+        )
 
     logging.info("三三ᕕ( ᐛ )ᕗ")
     await run_forever(servers)
