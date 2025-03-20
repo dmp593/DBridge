@@ -56,6 +56,11 @@ def parse_args():
     parser.add_argument("-b", "--db-port", type=int, default=default_database_port, required=default_database_port is None,
                         help="Database port (required if not set in environment)")
 
+    parser.add_argument("-n", "--min-threads", type=int, default=10,
+                        help="Minimum number of agent threads to start initially."
+                             " The system will scale based on load (default: 10)"
+                        )
+
     parser.add_argument("-r", "--retry-delay-seconds", type=positive_float, default=default_retry_delay_seconds,
                         help=f"Delay before retrying connection (default: {default_retry_delay_seconds:.2f}s)")
 
@@ -81,11 +86,11 @@ async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWrite
 
 
 async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int, use_ssl: bool, cert: str, retry_delay_seconds):
-    ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
+    token = uuid.uuid4()
 
     try:
+        ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
         proxy_reader, proxy_writer = await asyncio.open_connection(proxy_host, proxy_port, ssl=ssl_context)
-        token = uuid.uuid4()
 
         logging.info("三三ᕕ{ •̃_•̃ }ᕗ    ➤➤➤    %s" % token)
 
@@ -93,7 +98,7 @@ async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int
         await proxy_writer.drain()
 
         if await proxy_reader.read(7) != b"connect":
-            logging.info("🤨 Unexpected response from proxy.")
+            logging.info("stop being sus 𓆏")
 
             asyncio.create_task(  # Spawn a new connection
                 run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds)
@@ -102,11 +107,11 @@ async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int
             proxy_writer.close()
             return await proxy_writer.wait_closed()
 
-        db_reader, db_writer = await asyncio.open_connection(db_host, db_port)
-
         asyncio.create_task(  # Spawn a new connection
             run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds)
         )
+
+        db_reader, db_writer = await asyncio.open_connection(db_host, db_port)
 
         proxy_writer.write(b"ready")
         await proxy_writer.drain()
@@ -116,14 +121,22 @@ async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int
             forward(db_reader, proxy_writer)   # DB → Agent → Proxy
         )
 
-    except (OSError, asyncio.IncompleteReadError) as e:
-        logging.info("{╥﹏╥} Connection error, retrying in %.2f second(s)...", retry_delay_seconds)
+    except (OSError, asyncio.IncompleteReadError):
+        logging.info(
+            "{╥﹏╥} Connection Error, retrying in %.2f second(s)...", retry_delay_seconds
+        )
 
         await asyncio.sleep(retry_delay_seconds)
 
         asyncio.create_task(  # Spawn a new connection
             run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds)
         )
+
+    except Exception as ex:
+        logging.info("（￣へ￣）   ➤➤➤   (%s) %s", token, ex)
+
+    finally:
+        logging.info("(╯'□')╯︵ ┻━┻    ➤➤➤    %s" % token)
 
 
 async def shutdown(loop):
@@ -147,13 +160,11 @@ async def main():
     loop = asyncio.get_running_loop()
 
     try:
-        asyncio.create_task(
-            run_agent(args.proxy_host, args.proxy_port, args.db_host, args.db_port, args.ssl, args.cert, args.retry_delay_seconds)
-        )
-
-        asyncio.create_task(
-            run_agent(args.proxy_host, args.proxy_port, args.db_host, args.db_port, args.ssl, args.cert, args.retry_delay_seconds)
-        )
+        for _ in range(args.min_threads):
+            asyncio.create_task(
+                run_agent(args.proxy_host, args.proxy_port, args.db_host, args.db_port, args.ssl, args.cert,
+                          args.retry_delay_seconds)
+            )
 
         await asyncio.Event().wait()
 
