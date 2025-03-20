@@ -56,10 +56,8 @@ def parse_args():
     parser.add_argument("-b", "--db-port", type=int, default=default_database_port, required=default_database_port is None,
                         help="Database port (required if not set in environment)")
 
-    parser.add_argument("-n", "--min-threads", type=int, default=10,
-                        help="Minimum number of agent threads to start initially."
-                             " The system will scale based on load (default: 10)"
-                        )
+    parser.add_argument("-n", "--min-threads", type=int, default=3,
+                        help="Minimum number of agent threads to start initially. The system will scale based on load (default: 3)")
 
     parser.add_argument("-r", "--retry-delay-seconds", type=positive_float, default=default_retry_delay_seconds,
                         help=f"Delay before retrying connection (default: {default_retry_delay_seconds:.2f}s)")
@@ -162,8 +160,15 @@ async def main():
     try:
         for _ in range(args.min_threads):
             asyncio.create_task(
-                run_agent(args.proxy_host, args.proxy_port, args.db_host, args.db_port, args.ssl, args.cert,
-                          args.retry_delay_seconds)
+                run_agent(
+                    args.proxy_host,
+                    args.proxy_port,
+                    args.db_host,
+                    args.db_port,
+                    args.ssl,
+                    args.cert,
+                    args.retry_delay_seconds
+                )
             )
 
         await asyncio.Event().wait()
