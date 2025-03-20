@@ -147,10 +147,6 @@ async def main():
             run_agent(args.proxy_host, args.proxy_port, args.db_host, args.db_port, args.retry_delay_seconds)
         )
 
-        asyncio.create_task(
-            run_agent(args.proxy_host, args.proxy_port, args.db_host, args.db_port, args.retry_delay_seconds)
-        )
-
         await asyncio.Event().wait()
 
     except asyncio.CancelledError:

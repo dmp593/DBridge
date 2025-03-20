@@ -106,10 +106,6 @@ async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     logging.info("🎉 new client %s:%d", *writer.transport.get_extra_info('peername'))
 
-    if await context.is_empty():
-        writer.close()
-        return await writer.wait_closed()
-
     agent = await context.pop_agent()
 
     if not agent:
