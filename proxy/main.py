@@ -1,97 +1,62 @@
 import asyncio
 import logging
-import random
-
+import uuid
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+
 HOST = '0.0.0.0'
-PORT_AGENTS = 8000
-PORT_FORWARDS_AGENTS = 4000
-PORT_FORWARDS_CLIENTS = 3000
-
-
-notification_connection_create = b"connection.create"
+PORT_AGENTS = 4000
+PORT_CLIENTS = 3000
 
 
 class Agent:
-    token: str
+    token: uuid.UUID
 
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
 
-    forwards: list[
-        tuple[asyncio.StreamReader, asyncio.StreamWriter]
-    ]
-
-    def __init__(self, token: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    def __init__(self, token: uuid.UUID, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self.token = token
         self.reader = reader
         self.writer = writer
-        self.forwards = []
 
-    def pop(self, index: int = 0) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        return self.forwards.pop(index) if len(self.forwards) > 0 else (None, None)
 
-class State:
+class Context:
     lock: asyncio.Lock
-    agents: dict[str, Agent]
+    agents: dict[uuid.UUID, Agent]
 
     def __init__(self):
         self.lock = asyncio.Lock()
         self.agents = {}
 
-    async def add_agent_streams(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        token = await reader.read(36)
-        token = token.decode()
+    async def is_empty(self):
+        async with self.lock:
+            return len(self.agents) == 0
 
-        print(f"🎉 new agent: {token}")
+    async def add_agent(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        token = uuid.UUID(bytes=await reader.read(16))
+        logging.info(f"🎉 new agent: %s:%d (%s)", *writer.transport.get_extra_info('peername'), token)
 
         async with self.lock:
             self.agents[token] = Agent(token, reader, writer)
 
-        while not reader.at_eof():
-            await asyncio.sleep(0.3)
 
-        async with self.lock:
-            print(f"🗑️ removing agent: {token}")
-            agent = self.agents.pop(token)
+    async def pop_agent(self, token: uuid.UUID = None) -> Agent:
+        while not await self.is_empty():
+            if not token:
+                token = list(self.agents.keys())[0]
 
-        for (_, forward_writer) in agent.forwards:
-            print(f"🗑️ removing forward stream (agent: {token})")
-            forward_writer.close()
-            await forward_writer.wait_closed()
+            async with self.lock:
+                agent = self.agents.pop(token)
 
-    async def add_agent_forward_streams(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        token = await reader.read(36)
-        token = token.decode()
+                if not agent.reader.at_eof():
+                    return agent
 
-        print(f"🎉 new forward stream (agent: {token})")
-        fw_stream = (reader, writer)
-
-        async with self.lock:
-            self.agents[token].forwards.append(fw_stream)
-
-        while not reader.at_eof():
-            await asyncio.sleep(0.3)
-
-        async with self.lock:
-            print(f"🗑️ removing forward stream (agent: {token})")
-            self.agents[token].forwards.remove(fw_stream)
-
-    async def pop_agent_forward_streams(self):
-        async with self.lock:
-            agent: Agent = random.choice(list(self.agents.values()))
-            fw_stream = agent.forwards.pop(0)
-
-        agent.writer.write(notification_connection_create)
-        await agent.writer.drain()
-
-        print(f"🍾 popping forward stream (agent: {agent.token})")
-        return fw_stream
+        return None
 
 
-state = State()
+context = Context()
 
 
 async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
@@ -109,28 +74,35 @@ async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWrite
 
 
 async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    await state.add_agent_streams(reader, writer)
+    await context.add_agent(reader, writer)
 
 
-async def handle_forward_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    await state.add_agent_forward_streams(reader, writer)
+async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    logging.info("🎉 new client %s:%d", *writer.transport.get_extra_info('peername'))
 
+    if await context.is_empty():
+        writer.close()
+        return await writer.wait_closed()
 
-async def handle_forward_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    print("🎉 new client")
+    agent = await context.pop_agent()
 
-    try:
-        fwd_reader, fwd_writer = await state.pop_agent_forward_streams()
-    except IndexError:
+    if not agent:
+        writer.close()
+        return await writer.wait_closed()
+
+    agent.writer.write(b"connect")
+    await agent.writer.drain()
+
+    if await agent.reader.read(5) != b"ready":
         writer.close()
         return await writer.wait_closed()
 
     await asyncio.gather(
         asyncio.create_task(
-            forward(reader, fwd_writer)
+            forward(reader, agent.writer)
         ),
         asyncio.create_task(
-            forward(fwd_reader, writer)
+            forward(agent.reader, writer)
         )
     )
 
@@ -138,14 +110,10 @@ async def handle_forward_client(reader: asyncio.StreamReader, writer: asyncio.St
 async def shutdown(loop, servers):
     logging.info(f"(𓌻‸𓌻) ᴜɢʜ...")
 
-    async with state.lock:
-        for token, agent in state.agents.items():
-            for (_, fw_writer) in agent.forwards:
-                fw_writer.close()
-                await fw_writer.wait_closed()
-
-            agent.writer.close()
-            await agent.writer.wait_closed()
+    while not await context.is_empty():
+        agent = await context.pop_agent()
+        agent.writer.close()
+        await agent.writer.wait_closed()
 
     for server in servers:
         server.close()
@@ -165,8 +133,7 @@ async def main():
 
     servers = await asyncio.gather(
         asyncio.start_server(handle_agent, HOST, PORT_AGENTS),
-        asyncio.start_server(handle_forward_agent, HOST, PORT_FORWARDS_AGENTS),
-        asyncio.start_server(handle_forward_client, HOST, PORT_FORWARDS_CLIENTS)
+        asyncio.start_server(handle_client, HOST, PORT_CLIENTS)
     )
 
     try:
