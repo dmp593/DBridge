@@ -1,15 +1,12 @@
 import os
+import argparse
 import asyncio
 import logging
 import uuid
+import typing
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-
-HOST = os.getenv("HOST", "0.0.0.0")
-PORT_AGENTS =  int(os.getenv("PORT_AGENTS", 4000))
-PORT_CLIENTS = int(os.getenv("PORT_CLIENTS", 3000))
 
 
 class Agent:
@@ -59,6 +56,33 @@ class Context:
 
 
 context = Context()
+
+
+T = typing.TypeVar("T")
+
+
+def parse(to: typing.Type[T], value: typing.Any, or_default: T | None = None) -> T | None:
+    if isinstance(value, to):
+        return value
+
+    try:
+        return to(value)
+    except (ValueError, TypeError):
+        return or_default
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Proxy server for forwarding connections.")
+
+    default_host = os.getenv("HOST", "0.0.0.0")
+    default_port_agents = parse(to=int, value=os.getenv("PORT_AGENTS"), or_default=7000)
+    default_port_clients = parse(to=int, value=os.getenv("PORT_CLIENTS"), or_default=9000)
+
+    parser.add_argument("-x", "--host",  default=default_host, help=f"Host to listen on (default: {default_host})")
+    parser.add_argument("-a", "--port-agents", type=int, default=default_port_agents, help=f"Port for agent connections (default: {default_port_agents})")
+    parser.add_argument("-c", "--port-clients", type=int, default=default_port_clients, help=f"Port for client connections (default: {default_port_clients})")
+
+    return parser.parse_args()
 
 
 async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
@@ -131,11 +155,12 @@ async def shutdown(loop, servers):
 
 
 async def main():
+    args = parse_args()
     loop = asyncio.get_running_loop()
 
     servers = await asyncio.gather(
-        asyncio.start_server(handle_agent, HOST, PORT_AGENTS),
-        asyncio.start_server(handle_client, HOST, PORT_CLIENTS)
+        asyncio.start_server(handle_agent, args.host, args.port_agents),
+        asyncio.start_server(handle_client, args.host, args.port_clients)
     )
 
     try:
