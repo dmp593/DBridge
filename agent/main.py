@@ -82,11 +82,10 @@ async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWrite
 
 
 async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int, use_ssl: bool, cert: str, retry_delay_seconds):
-    token = uuid.uuid4()
-    task = asyncio.current_task()
-
     async with tasks_lock:
-        running_tasks.add(task)
+        running_tasks.add(asyncio.current_task())
+
+    token = uuid.uuid4()
 
     try:
         ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
