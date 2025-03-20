@@ -36,9 +36,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Agent to connect to proxy and forward data.")
 
     default_proxy_host = os.getenv("PROXY_HOST")
-    default_proxy_port = parse(to=int, value=os.getenv("PROXY_PORT"), or_default=4000)
+    default_proxy_port = parse(to=int, value=os.getenv("PROXY_PORT"), or_default=7000)
 
-    default_database_host = os.getenv("DATABASE_HOST")
+    default_database_host = os.getenv("DATABASE_HOST", "localhost")
     default_database_port = parse(to=int, value=os.getenv("DATABASE_PORT"), or_default=None)
 
     default_retry_delay_seconds = parse(to=float, value=os.getenv("RETRY_DELAY_SECONDS"), or_default=1.0)
@@ -49,11 +49,10 @@ def parse_args():
     parser.add_argument("-q", "--proxy-port", type=int, default=default_proxy_port,
                         help=f"Proxy server port (default: {default_proxy_port})")
 
-    parser.add_argument("-d", "--db-host", default=default_database_host, required=default_database_host is None,
-                        help="Database host (required if not set in environment)")
+    parser.add_argument("-d", "--db-host", default=default_database_host,
+                        help=f"Database host (default: {default_database_host})")
 
-    parser.add_argument("-b", "--db-port", type=int, default=default_database_port,
-                        required=default_database_port is None,
+    parser.add_argument("-b", "--db-port", type=int, default=default_database_port, required=default_database_port is None,
                         help="Database port (required if not set in environment)")
 
     parser.add_argument("-r", "--retry-delay-seconds", type=positive_float, default=default_retry_delay_seconds,
