@@ -6,17 +6,17 @@ import typing
 import uuid
 import ssl
 
-
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-
 T = typing.TypeVar("T")
+
+running_tasks = set()
+tasks_lock = asyncio.Lock()
 
 
 def parse(to: typing.Type[T], value: typing.Any, or_default: T | None = None) -> T | None:
     if isinstance(value, to):
         return value
-
     try:
         return to(value)
     except (ValueError, TypeError):
@@ -72,10 +72,8 @@ def parse_args():
 async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
     while True:
         data = await source.read(4096)
-
         if not data:
             break
-
         destination.write(data)
         await destination.drain()
 
@@ -85,6 +83,10 @@ async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWrite
 
 async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int, use_ssl: bool, cert: str, retry_delay_seconds):
     token = uuid.uuid4()
+    task = asyncio.current_task()
+
+    async with tasks_lock:
+        running_tasks.add(task)
 
     try:
         ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
@@ -98,16 +100,13 @@ async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int
         if await proxy_reader.read(7) != b"connect":
             logging.info("stop being sus 𓆏")
 
-            asyncio.create_task(  # Spawn a new connection
-                run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds)
-            )
+            # Spawn a new connection
+            asyncio.create_task(run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds))
 
             proxy_writer.close()
             return await proxy_writer.wait_closed()
 
-        asyncio.create_task(  # Spawn a new connection
-            run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds)
-        )
+        asyncio.create_task(run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds))
 
         db_reader, db_writer = await asyncio.open_connection(db_host, db_port)
 
@@ -126,9 +125,7 @@ async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int
 
         await asyncio.sleep(retry_delay_seconds)
 
-        asyncio.create_task(  # Spawn a new connection
-            run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds)
-        )
+        asyncio.create_task(run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds))
 
     except Exception as ex:
         logging.info("（￣へ￣）   ➤➤➤   (%s) %s", token, ex)
@@ -136,21 +133,36 @@ async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int
     finally:
         logging.info("(╯'□')╯︵ ┻━┻    ➤➤➤    %s" % token)
 
+        async with tasks_lock:
+            running_tasks.discard(task)
+
 
 async def shutdown(loop):
     logging.info(f"{{𓌻‸𓌻}} ᴜɢʜ...")
 
     await asyncio.sleep(0.5)  # Allow logs to flush
 
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    async with tasks_lock:
+        tasks = list(running_tasks)
 
     for task in tasks:
         task.cancel()
 
-    # Wait until all tasks are finished or canceled
     await asyncio.gather(*tasks, return_exceptions=True)
 
     loop.call_soon(loop.stop)
+
+
+# def track_task(task):
+#     async def remove_task():
+#         async with tasks_lock:
+#             running_tasks.discard(task)
+#
+#     task.add_done_callback(
+#         lambda t: asyncio.create_task(
+#             remove_task()
+#         )
+#     )
 
 
 async def main():
@@ -159,6 +171,7 @@ async def main():
 
     try:
         for _ in range(args.min_threads):
+            # track_task(
             asyncio.create_task(
                 run_agent(
                     args.proxy_host,
@@ -170,6 +183,7 @@ async def main():
                     args.retry_delay_seconds
                 )
             )
+            # )
 
         await asyncio.Event().wait()
 

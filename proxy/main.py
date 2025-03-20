@@ -126,10 +126,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
     for i in range(10):  # max tries to wait for an agent
         agent = await context.pop_agent()
-
         if agent: break
-
-        await asyncio.sleep(0.5)  # sleep 0.5s, waiting for an agent...
+        await asyncio.sleep(0.7)  # sleep 0.7s, waiting for an agent...
 
     if not agent:
         writer.close()
