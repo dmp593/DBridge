@@ -41,19 +41,21 @@ class Context:
         async with self.lock:
             self.agents[token] = Agent(token, reader, writer)
 
+    async def pop_agent(self) -> Agent | None:
+        while True:
+            try:
+                async with self.lock:
+                    token, agent = self.agents.popitem()
 
-    async def pop_agent(self, token: uuid.UUID = None) -> Agent | None:
-        while not await self.is_empty():
-            if not token:
-                token = list(self.agents.keys())[0]
+                if agent.reader.at_eof():
+                    agent.writer.close()
+                    await agent.writer.wait_closed()
+                    continue
 
-            async with self.lock:
-                agent = self.agents.pop(token)
+                return agent
 
-                if not agent.reader.at_eof():
-                    return agent
-
-        return None
+            except KeyError:
+                return None
 
 
 context = Context()
