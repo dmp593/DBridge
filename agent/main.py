@@ -4,6 +4,7 @@ import asyncio
 import logging
 import typing
 import uuid
+import ssl
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -58,7 +59,12 @@ def parse_args():
     parser.add_argument("-r", "--retry-delay-seconds", type=positive_float, default=default_retry_delay_seconds,
                         help=f"Delay before retrying connection (default: {default_retry_delay_seconds:.2f}s)")
 
+    parser.add_argument("-s", "--ssl", action="store_true", help="Enable SSL for connecting to the proxy")
+
+    parser.add_argument("-c", "--cert", type=str, help="Path to the CA certificate file (optional)")
+
     return parser.parse_args()
+
 
 async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
     while True:
@@ -74,9 +80,11 @@ async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWrite
     await destination.wait_closed()
 
 
-async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int, retry_delay_seconds: float = 1.0):
+async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int, use_ssl: bool, cert: str, retry_delay_seconds):
+    ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
+
     try:
-        proxy_reader, proxy_writer = await asyncio.open_connection(proxy_host, proxy_port)
+        proxy_reader, proxy_writer = await asyncio.open_connection(proxy_host, proxy_port, ssl=ssl_context)
         token = uuid.uuid4()
 
         logging.info("三三ᕕ{ •̃_•̃ }ᕗ    ➤➤➤    %s" % token)
@@ -88,7 +96,7 @@ async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int
             logging.info("🤨 Unexpected response from proxy.")
 
             asyncio.create_task(  # Spawn a new connection
-                run_agent(proxy_host, proxy_port, db_host, db_port, retry_delay_seconds)
+                run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds)
             )
 
             proxy_writer.close()
@@ -97,7 +105,7 @@ async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int
         db_reader, db_writer = await asyncio.open_connection(db_host, db_port)
 
         asyncio.create_task(  # Spawn a new connection
-            run_agent(proxy_host, proxy_port, db_host, db_port, retry_delay_seconds)
+            run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds)
         )
 
         proxy_writer.write(b"ready")
@@ -114,7 +122,7 @@ async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int
         await asyncio.sleep(retry_delay_seconds)
 
         asyncio.create_task(  # Spawn a new connection
-            run_agent(proxy_host, proxy_port, db_host, db_port, retry_delay_seconds)
+            run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds)
         )
 
 
@@ -140,11 +148,11 @@ async def main():
 
     try:
         asyncio.create_task(
-            run_agent(args.proxy_host, args.proxy_port, args.db_host, args.db_port, args.retry_delay_seconds)
+            run_agent(args.proxy_host, args.proxy_port, args.db_host, args.db_port, args.ssl, args.cert, args.retry_delay_seconds)
         )
 
         asyncio.create_task(
-            run_agent(args.proxy_host, args.proxy_port, args.db_host, args.db_port, args.retry_delay_seconds)
+            run_agent(args.proxy_host, args.proxy_port, args.db_host, args.db_port, args.ssl, args.cert, args.retry_delay_seconds)
         )
 
         await asyncio.Event().wait()

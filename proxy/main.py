@@ -4,6 +4,7 @@ import asyncio
 import logging
 import uuid
 import typing
+import ssl
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -78,12 +79,25 @@ def parse_args():
     default_port_agents = parse(to=int, value=os.getenv("PORT_AGENTS"), or_default=7000)
     default_port_clients = parse(to=int, value=os.getenv("PORT_CLIENTS"), or_default=9000)
 
-    parser.add_argument("-x", "--host",  default=default_host, help=f"Host to listen on (default: {default_host})")
-    parser.add_argument("-a", "--port-agents", type=int, default=default_port_agents, help=f"Port for agent connections (default: {default_port_agents})")
-    parser.add_argument("-c", "--port-clients", type=int, default=default_port_clients, help=f"Port for client connections (default: {default_port_clients})")
+    parser.add_argument("-x", "--host", default=default_host,
+                        help=f"Host to listen on (default: {default_host})")
+
+    parser.add_argument("-a", "--port-agents", type=int, default=default_port_agents,
+                        help=f"Port for agent connections (default: {default_port_agents})")
+
+    parser.add_argument("-p", "--port-clients", type=int, default=default_port_clients,
+                        help=f"Port for client connections (default: {default_port_clients})")
+
+    parser.add_argument("-s", "--ssl", action="store_true",
+                        help="Enable SSL for secure connections")
+
+    parser.add_argument("-c", "--cert", default="cert.pem",
+                        help="SSL certificate file (default: cert.pem)")
+
+    parser.add_argument("-k", "--key", default="key.pem",
+                        help="SSL private key file (default: key.pem)")
 
     return parser.parse_args()
-
 
 async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
     while True:
@@ -154,9 +168,14 @@ async def main():
     args = parse_args()
     loop = asyncio.get_running_loop()
 
+    ssl_context = None
+    if args.ssl:
+        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_context.load_cert_chain(certfile=args.cert, keyfile=args.key)
+
     servers = await asyncio.gather(
-        asyncio.start_server(handle_agent, args.host, args.port_agents),
-        asyncio.start_server(handle_client, args.host, args.port_clients)
+        asyncio.start_server(handle_agent, args.host, args.port_agents, ssl=ssl_context),
+        asyncio.start_server(handle_client, args.host, args.port_clients, ssl=ssl_context)
     )
 
     try:
