@@ -82,8 +82,10 @@ async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWrite
 
 
 async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int, use_ssl: bool, cert: str, retry_delay_seconds):
+    task = asyncio.current_task()
+
     async with tasks_lock:
-        running_tasks.add(asyncio.current_task())
+        running_tasks.add(task)
 
     token = uuid.uuid4()
 
