@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument("-x", "--proxy-host", default=default_proxy_host, required=default_proxy_host is None,
                         help="Proxy server host (required if not set in environment)")
 
-    parser.add_argument("-q", "--proxy-port", type=int, default=default_proxy_port,
+    parser.add_argument("-p", "--proxy-port", type=int, default=default_proxy_port,
                         help=f"Proxy server port (default: {default_proxy_port})")
 
     parser.add_argument("-d", "--db-host", default=default_database_host,
