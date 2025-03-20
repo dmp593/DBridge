@@ -1,13 +1,15 @@
+import os
 import asyncio
 import logging
 import uuid
 
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-HOST = '0.0.0.0'
-PORT_AGENTS = 4000
-PORT_CLIENTS = 3000
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT_AGENTS =  int(os.getenv("PORT_AGENTS", 4000))
+PORT_CLIENTS = int(os.getenv("PORT_CLIENTS", 3000))
 
 
 class Agent:
