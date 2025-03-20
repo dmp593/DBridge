@@ -42,7 +42,7 @@ class Context:
             self.agents[token] = Agent(token, reader, writer)
 
 
-    async def pop_agent(self, token: uuid.UUID = None) -> Agent:
+    async def pop_agent(self, token: uuid.UUID = None) -> Agent | None:
         while not await self.is_empty():
             if not token:
                 token = list(self.agents.keys())[0]
