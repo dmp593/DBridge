@@ -127,8 +127,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     for i in range(10):  # max tries to wait for an agent
         agent = await context.pop_agent()
 
-        if not agent:
-            await asyncio.sleep(0.5)  # sleep 0.5s, waiting for an agent...
+        if agent: break
+
+        await asyncio.sleep(0.5)  # sleep 0.5s, waiting for an agent...
 
     if not agent:
         writer.close()
@@ -156,8 +157,10 @@ async def shutdown(loop, servers):
 
     while not await context.is_empty():
         agent = await context.pop_agent()
-        agent.writer.close()
-        await agent.writer.wait_closed()
+
+        if agent:
+            agent.writer.close()
+            await agent.writer.wait_closed()
 
     for server in servers:
         server.close()
