@@ -289,7 +289,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await writer.wait_closed()
 
 
-async def shutdown(loop, servers: list):
+async def shutdown(loop, servers: tuple):
     logging.info("️( -_•)︻デ═一💥 killing...")
 
     await asyncio.sleep(0.5)  # Allow logs to flush
