@@ -96,6 +96,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Proxy server for forwarding connections.")
 
     default_host = os.getenv("HOST", "0.0.0.0")
+    default_port_liveness = parse(to=int, value=os.getenv("PORT_LIVENESS"), or_default=3130)
+    default_port_readiness = parse(to=int, value=os.getenv("PORT_READINESS"), or_default=4260)
+
     default_port_agents = parse(to=int, value=os.getenv("PORT_AGENTS"), or_default=7000)
     default_port_clients = parse(to=int, value=os.getenv("PORT_CLIENTS"), or_default=9000)
 
@@ -108,6 +111,12 @@ def parse_args():
 
     parser.add_argument("-x", "--host", default=default_host,
                         help=f"Host to listen on (default: {default_host})")
+
+    parser.add_argument("-l", "--port-liveness", type=int, default=default_port_liveness,
+                        help=f"Port for liveness prob (default: {default_port_liveness})")
+
+    parser.add_argument("-r", "--port-readiness", type=int, default=default_port_readiness,
+                        help=f"Port for readiness prob (default: {default_port_readiness})")
 
     parser.add_argument("-a", "--port-agents", type=int, default=default_port_agents,
                         help=f"Port for agent connections (default: {default_port_agents})")
@@ -163,6 +172,27 @@ async def forward(agent_token: uuid.UUID, source_peername: tuple[str, int], sour
     finally:
         destination.close()
         await destination.wait_closed()
+
+
+async def handle_liveness(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    writer.write("🚀 Alive and forwarding packets like a champ!".encode())
+    await writer.drain()
+
+    writer.close()
+    await writer.wait_closed()
+
+
+async def handle_readiness(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    if await context.is_empty():
+        message = "⚠️ Not ready! Waiting for agents to join..."
+    else:
+        message = "🚀 Ready to forward packets like a pro!"
+
+    writer.write(message.encode("utf-8"))
+    await writer.drain()
+
+    writer.close()
+    await writer.wait_closed()
 
 
 async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -258,6 +288,14 @@ async def main():
         ssl_context.load_cert_chain(certfile=args.cert, keyfile=args.key)
 
     servers = await asyncio.gather(
+        asyncio.start_server(
+            handle_liveness, args.host, args.port_liveness
+        ),
+
+        asyncio.start_server(
+            handle_readiness, args.host, args.port_readiness
+        ),
+
         asyncio.start_server(
             handle_agent, args.host, args.port_agents, ssl=ssl_context
         ),
