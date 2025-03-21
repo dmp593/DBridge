@@ -142,9 +142,7 @@ async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     await writer.wait_closed()
 
 
-async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds, queue: asyncio.Queue):
-    token = uuid.uuid4()
-
+async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds, queue: asyncio.Queue):
     try:
         ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
         proxy_reader, proxy_writer = await asyncio.open_connection(proxy_host, proxy_port, ssl=ssl_context)
@@ -155,7 +153,7 @@ async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, ret
         await proxy_writer.drain()
 
         if await proxy_reader.read(7) != b"connect":
-            logging.info("(%s) 🥜 Something went nuts.", token)
+            logging.info("(%s) 🥜 Something went nuts", token)
 
             proxy_writer.close()
             await proxy_writer.wait_closed()
@@ -200,13 +198,15 @@ async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, ret
         logging.info("(%s) ❌ Exception: %s", token, ex)
 
     finally:
-        logging.info("(%s) 🗑 Discarding ..." % token)
+        logging.info("(%s) 🪦 R.I.P", token)
 
 
 async def spawn_agents(queue: asyncio.Queue, *args):
     while True:
         await queue.get()  # Wait for a signal to spawn an agent
-        asyncio.create_task(run_agent(*args, queue))
+        token = uuid.uuid4()
+        logging.info("(%s) 🤰 Laboring a new agent", token)
+        asyncio.create_task(run_agent(token, *args, queue))
 
 
 async def shutdown(loop, health_server):

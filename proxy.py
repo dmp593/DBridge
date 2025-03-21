@@ -98,9 +98,11 @@ def parse_args():
     default_host = os.getenv("HOST", "0.0.0.0")
     default_port_liveness = parse(to=int, value=os.getenv("PORT_LIVENESS"), or_default=3130)
     default_port_readiness = parse(to=int, value=os.getenv("PORT_READINESS"), or_default=4260)
-
     default_port_agents = parse(to=int, value=os.getenv("PORT_AGENTS"), or_default=7000)
     default_port_clients = parse(to=int, value=os.getenv("PORT_CLIENTS"), or_default=9000)
+
+    default_allowed_agents = os.getenv("ALLOWED_AGENTS", "*")
+    default_allowed_clients = os.getenv("ALLOWED_CLIENTS", "*")
 
     default_wait_agent_max_tries = parse(to=int, value=os.getenv("WAIT_AGENT_MAX_TRIES"), or_default=10)
     default_wait_agent_retry_sleep_time = parse(to=float, value=os.getenv("WAIT_AGENT_SLEEP_TIME"), or_default=0.7)
@@ -123,6 +125,12 @@ def parse_args():
 
     parser.add_argument("-p", "--port-clients", type=int, default=default_port_clients,
                         help=f"Port for client connections (default: {default_port_clients})")
+
+    parser.add_argument("-q", "--allow-agent", type=str, nargs='+', default=default_allowed_agents,
+                        help=f"Agent hostname or IP addresses allowed to access (default: {default_allowed_agents})")
+
+    parser.add_argument("-i", "--allow-client", type=str, nargs='+', default=default_allowed_clients,
+                        help=f"Client hostname or IP addresses allowed to access (default: {default_allowed_clients})")
 
     parser.add_argument("-t", "--wait-agent-max-tries", type=int, default=default_wait_agent_max_tries,
                         help=f"Maximum number of attempts to find an agent (default: {default_wait_agent_max_tries})")
@@ -195,12 +203,39 @@ async def handle_readiness(reader: asyncio.StreamReader, writer: asyncio.StreamW
     await writer.wait_closed()
 
 
-async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allowed_hosts: list[str]):
+    agent_peername = writer.transport.get_extra_info('peername')
+
+    if '*' not in allowed_hosts and agent_peername[0] not in allowed_hosts:
+        logging.info(
+            "🚨 ACCESS DENIED 🚨 | Unauthorized agent attempted to connect! "
+            "IP: %s | Possible Intrusion Attempt! 🏴‍☠️",
+            agent_peername[0]
+        )
+
+        writer.close()
+        await writer.wait_closed()
+
+        return
+
     await context.add_agent(reader, writer)
 
 
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, wait_agent_max_tries: int, wait_agent_sleep_time: float):
+async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allowed_hosts: list[str], wait_agent_max_tries: int, wait_agent_sleep_time: float):
     client_peername = writer.transport.get_extra_info('peername')
+
+    if '*' not in allowed_hosts and client_peername[0] not in allowed_hosts:
+        logging.info(
+            "🚨 ACCESS DENIED 🚨 | Unauthorized client attempted to connect! "
+            "IP: %s | Possible Intrusion Attempt! 🏴‍☠️",
+            client_peername[0]
+        )
+
+        writer.close()
+        await writer.wait_closed()
+
+        return
+
     logging.info("🎉 new client %s:%d", *client_peername)
 
     agent = None
@@ -299,11 +334,14 @@ async def main():
         ),
 
         asyncio.start_server(
-            handle_agent, args.host, args.port_agents, ssl=ssl_context
+            lambda r, w: handle_agent(r, w, args.allow_agent),
+            args.host,
+            args.port_agents,
+            ssl=ssl_context
         ),
 
         asyncio.start_server(
-            lambda r, w: handle_client(r, w, args.wait_agent_max_tries, args.wait_agent_sleep_time),
+            lambda r, w: handle_client(r, w, args.allow_client, args.wait_agent_max_tries, args.wait_agent_sleep_time),
             args.host,
             args.port_clients,
             ssl=ssl_context
