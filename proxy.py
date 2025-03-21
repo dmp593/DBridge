@@ -78,6 +78,20 @@ def parse(to: typing.Type[T], value: typing.Any, or_default: T | None = None) ->
         return or_default
 
 
+def parse_bool(value: typing.Any, or_default: typing.Any | None = None) -> typing.Any | None:
+    if isinstance(value, int):
+        return value != 0
+
+    if isinstance(value, str):
+        match value.lower().strip():
+            case "yes" | "y" | "t" | "true" | "s" | "sim" | "yea" | "yeah" | "on" | 1 | "1":
+                return True
+            case "no" | "n" | "f" | "false" | "ñ" | "não" | "nao" | "nop" | "nope" | "off" | 0 | "0" | "":
+                return False
+            case _:
+                return or_default
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Proxy server for forwarding connections.")
 
@@ -87,6 +101,10 @@ def parse_args():
 
     default_wait_agent_max_tries = parse(to=int, value=os.getenv("WAIT_AGENT_MAX_TRIES"), or_default=10)
     default_wait_agent_retry_sleep_time = parse(to=float, value=os.getenv("WAIT_AGENT_SLEEP_TIME"), or_default=0.7)
+
+    default_use_ssl = parse_bool(value=os.getenv("USE_SSL"), or_default=False)
+    default_ssl_cert = os.getenv("SSL_CERT", None)
+    default_ssl_key = os.getenv("SSL_KEY", None)
 
     parser.add_argument("-x", "--host", default=default_host,
                         help=f"Host to listen on (default: {default_host})")
@@ -103,14 +121,14 @@ def parse_args():
     parser.add_argument("-z", "--wait-agent-sleep-time", type=float, default=default_wait_agent_retry_sleep_time,
                         help=f"Time to sleep between retries when no agent is available (default: {default_wait_agent_retry_sleep_time})")
 
-    parser.add_argument("-s", "--ssl", action="store_true",
-                        help="Enable SSL for secure connections")
+    parser.add_argument("-s", "--ssl", action="store_true", default=default_use_ssl,
+                        help="Enable SSL for secure connections (default: no)")
 
-    parser.add_argument("-c", "--cert", default="cert.pem",
-                        help="SSL certificate file (default: cert.pem)")
+    parser.add_argument("-c", "--cert", default=default_ssl_cert,
+                        help=f"SSL certificate file (optional)")
 
-    parser.add_argument("-k", "--key", default="key.pem",
-                        help="SSL private key file (default: key.pem)")
+    parser.add_argument("-k", "--key", default=default_ssl_key,
+                        help=f"SSL private key file (optional)")
 
     return parser.parse_args()
 

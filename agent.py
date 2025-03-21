@@ -20,6 +20,20 @@ def parse(to: typing.Type[T], value: typing.Any, or_default: T | None = None) ->
         return or_default
 
 
+def parse_bool(value: typing.Any, or_default: typing.Any | None = None) -> typing.Any | None:
+    if isinstance(value, int):
+        return value != 0
+
+    if isinstance(value, str):
+        match value.lower().strip():
+            case "yes" | "y" | "t" | "true" | "s" | "sim" | "yea" | "yeah" | "on" | 1 | "1":
+                return True
+            case "no" | "n" | "f" | "false" | "ñ" | "não" | "nao" | "nop" | "nope" | "off" | 0 | "0" | "":
+                return False
+            case _:
+                return or_default
+
+
 def validate_min_threads(value):
     try:
         f_value = int(value)
@@ -49,8 +63,11 @@ def parse_args():
     default_database_host = os.getenv("DATABASE_HOST", "localhost")
     default_database_port = parse(to=int, value=os.getenv("DATABASE_PORT"), or_default=None)
 
-    default_min_threads = parse(to=int, value=os.getenv("MIN_THREADS", os.cpu_count()), or_default=None)
+    default_min_threads = parse(to=int, value=os.getenv("MIN_THREADS", os.cpu_count()), or_default=1)
     default_retry_delay_seconds = parse(to=float, value=os.getenv("RETRY_DELAY_SECONDS"), or_default=1.0)
+
+    default_use_ssl = parse_bool(value=os.getenv("USE_SSL"), or_default=False)
+    default_ssl_cert = os.getenv("SSL_CERT", None)
 
     parser.add_argument("-x", "--proxy-host", default=default_proxy_host, required=default_proxy_host is None,
                         help="Proxy server host (required if not set in environment)")
@@ -70,9 +87,11 @@ def parse_args():
     parser.add_argument("-r", "--retry-delay-seconds", type=validate_retry_delay_seconds, default=default_retry_delay_seconds,
                         help=f"Delay before retrying connection (default: {default_retry_delay_seconds:.2f}s)")
 
-    parser.add_argument("-s", "--ssl", action="store_true", help="Enable SSL for connecting to the proxy")
+    parser.add_argument("-s", "--ssl", action="store_true", default=default_use_ssl,
+                        help="Enable SSL for connecting to the proxy (default: no)")
 
-    parser.add_argument("-c", "--cert", type=str, help="Path to the CA certificate file (optional)")
+    parser.add_argument("-c", "--cert", type=str, default=default_ssl_cert,
+                        help=f"Path to the CA certificate file (optional)")
 
     return parser.parse_args()
 
