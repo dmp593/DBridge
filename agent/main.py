@@ -92,6 +92,9 @@ async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWrite
     except ConnectionResetError:
         logging.info("😩 connection reset")
 
+    except Exception:
+        logging.info("👽 Something crazy happened.")
+
     finally:
         destination.close()
         await destination.wait_closed()
@@ -125,10 +128,20 @@ async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, ret
         proxy_writer.write(b"ready")
         await proxy_writer.drain()
 
-        await asyncio.gather(
-            forward(proxy_reader, db_writer),  # Proxy → Agent → DB
-            forward(db_reader, proxy_writer)   # DB → Agent → Proxy
-        )
+        try:
+            await asyncio.gather(
+                forward(proxy_reader, db_writer),  # Proxy → Agent → DB
+                forward(db_reader, proxy_writer)   # DB → Agent → Proxy
+            )
+
+        except Exception:
+            logging.info("🛸 Something crazy happened.")
+
+            db_writer.close()
+            await db_writer.wait_closed()
+
+            proxy_writer.close()
+            await proxy_writer.wait_closed()
 
     except (OSError, asyncio.IncompleteReadError):
         logging.info("(%s) 😭 Connection error, retrying in %.2f second(s)...", token, retry_delay_seconds)
@@ -187,8 +200,12 @@ async def main():
         await asyncio.Event().wait()  # Keep the event loop running
 
     except asyncio.CancelledError:
+        logging.info("🛑 Agent was cancelled.")
         await shutdown(loop)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("🔫 Interrupted by user.")

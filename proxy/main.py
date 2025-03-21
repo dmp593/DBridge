@@ -124,10 +124,13 @@ async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWrite
             await destination.drain()
 
     except asyncio.IncompleteReadError:
-        logging.info("😢 unexpected EOF")
+        logging.info("😢 Unexpected EOF")
 
     except ConnectionResetError:
-        logging.info("😩 connection reset")
+        logging.info("😩 Connection reset")
+
+    except Exception:
+        logging.info("👽 Something crazy happened.")
 
     finally:
         destination.close()
@@ -168,14 +171,24 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
         return
 
-    await asyncio.gather(
-        asyncio.create_task(
-            forward(reader, agent.writer)
-        ),
-        asyncio.create_task(
-            forward(agent.reader, writer)
+    try:
+        await asyncio.gather(
+            asyncio.create_task(
+                forward(reader, agent.writer)
+            ),
+            asyncio.create_task(
+                forward(agent.reader, writer)
+            )
         )
-    )
+    except Exception:
+        logging.info("🛸 Something crazy happened.")
+
+        agent.writer.close()
+        await agent.writer.wait_closed()
+
+        writer.close()
+        await writer.wait_closed()
+
 
 
 async def shutdown(loop, servers):
@@ -229,8 +242,12 @@ async def main():
         await asyncio.Event().wait()
 
     except asyncio.CancelledError:
+        logging.info("🛑 Proxy was cancelled.")
         await shutdown(loop, servers)
 
 
-if __name__ == '__main__':
-    asyncio.run(main())
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("🔫 Interrupted by user.")
