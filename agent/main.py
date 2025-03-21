@@ -49,6 +49,7 @@ def parse_args():
     default_database_host = os.getenv("DATABASE_HOST", "localhost")
     default_database_port = parse(to=int, value=os.getenv("DATABASE_PORT"), or_default=None)
 
+    default_min_threads = parse(to=int, value=os.getenv("MIN_THREADS", os.cpu_count()), or_default=None)
     default_retry_delay_seconds = parse(to=float, value=os.getenv("RETRY_DELAY_SECONDS"), or_default=1.0)
 
     parser.add_argument("-x", "--proxy-host", default=default_proxy_host, required=default_proxy_host is None,
@@ -63,8 +64,8 @@ def parse_args():
     parser.add_argument("-b", "--db-port", type=int, default=default_database_port, required=default_database_port is None,
                         help="Database port (required if not set in environment)")
 
-    parser.add_argument("-n", "--min-threads", type=validate_min_threads, default=1,
-                        help="Minimum number of agent threads to start initially. The system will scale based on load (default: 3)")
+    parser.add_argument("-n", "--min-threads", type=validate_min_threads, default=default_min_threads,
+                        help=f"Minimum number of agent threads to start initially. The system will scale based on load (default: {default_min_threads})")
 
     parser.add_argument("-r", "--retry-delay-seconds", type=validate_retry_delay_seconds, default=default_retry_delay_seconds,
                         help=f"Delay before retrying connection (default: {default_retry_delay_seconds:.2f}s)")
@@ -187,7 +188,6 @@ async def main():
 
     except asyncio.CancelledError:
         await shutdown(loop)
-
 
 
 if __name__ == "__main__":
