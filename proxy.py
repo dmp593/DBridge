@@ -291,11 +291,11 @@ async def main():
 
     servers = await asyncio.gather(
         asyncio.start_server(
-            handle_liveness, args.host, args.port_liveness
+            handle_liveness, "localhost", args.port_liveness
         ),
 
         asyncio.start_server(
-            handle_readiness, args.host, args.port_readiness
+            handle_readiness, "localhost", args.port_readiness
         ),
 
         asyncio.start_server(
