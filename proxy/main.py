@@ -85,8 +85,8 @@ def parse_args():
     default_port_agents = parse(to=int, value=os.getenv("PORT_AGENTS"), or_default=7000)
     default_port_clients = parse(to=int, value=os.getenv("PORT_CLIENTS"), or_default=9000)
 
-    default_wait_agent_max_tries = parse(to=int, value=os.getenv("MAX_TRIES"), or_default=10)
-    default_wait_agent_retry_sleep_time = parse(to=float, value=os.getenv("SLEEP_TIME"), or_default=0.7)
+    default_wait_agent_max_tries = parse(to=int, value=os.getenv("WAIT_AGENT_MAX_TRIES"), or_default=10)
+    default_wait_agent_retry_sleep_time = parse(to=float, value=os.getenv("WAIT_AGENT_SLEEP_TIME"), or_default=0.7)
 
     parser.add_argument("-x", "--host", default=default_host,
                         help=f"Host to listen on (default: {default_host})")
