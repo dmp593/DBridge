@@ -10,9 +10,6 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 T = typing.TypeVar("T")
 
-running_tasks = set()
-tasks_lock = asyncio.Lock()
-
 
 def parse(to: typing.Type[T], value: typing.Any, or_default: T | None = None) -> T | None:
     if isinstance(value, to):
@@ -23,7 +20,17 @@ def parse(to: typing.Type[T], value: typing.Any, or_default: T | None = None) ->
         return or_default
 
 
-def positive_float(value):
+def validate_min_threads(value):
+    try:
+        f_value = int(value)
+        if f_value <= 0:
+            raise argparse.ArgumentTypeError("must be a positive integer")
+        return f_value
+    except ValueError:
+        raise argparse.ArgumentTypeError("Invalid integer value.")
+
+
+def validate_retry_delay_seconds(value):
     try:
         f_value = float(value)
         if f_value <= 0 or f_value > 300:
@@ -56,10 +63,10 @@ def parse_args():
     parser.add_argument("-b", "--db-port", type=int, default=default_database_port, required=default_database_port is None,
                         help="Database port (required if not set in environment)")
 
-    parser.add_argument("-n", "--min-threads", type=int, default=3,
+    parser.add_argument("-n", "--min-threads", type=validate_min_threads, default=1,
                         help="Minimum number of agent threads to start initially. The system will scale based on load (default: 3)")
 
-    parser.add_argument("-r", "--retry-delay-seconds", type=positive_float, default=default_retry_delay_seconds,
+    parser.add_argument("-r", "--retry-delay-seconds", type=validate_retry_delay_seconds, default=default_retry_delay_seconds,
                         help=f"Delay before retrying connection (default: {default_retry_delay_seconds:.2f}s)")
 
     parser.add_argument("-s", "--ssl", action="store_true", help="Enable SSL for connecting to the proxy")
@@ -70,45 +77,48 @@ def parse_args():
 
 
 async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
-    while True:
-        data = await source.read(4096)
-        if not data:
-            break
-        destination.write(data)
-        await destination.drain()
+    try:
+        while True:
+            data = await source.read(4096)
+            if not data:
+                break
+            destination.write(data)
+            await destination.drain()
 
-    destination.close()
-    await destination.wait_closed()
+    except asyncio.IncompleteReadError:
+        logging.info("😢 unexpected EOF")
+
+    except ConnectionResetError:
+        logging.info("😩 connection reset")
+
+    finally:
+        destination.close()
+        await destination.wait_closed()
 
 
-async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int, use_ssl: bool, cert: str, retry_delay_seconds):
-    task = asyncio.current_task()
-
-    async with tasks_lock:
-        running_tasks.add(task)
-
+async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds, queue: asyncio.Queue):
     token = uuid.uuid4()
 
     try:
         ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
         proxy_reader, proxy_writer = await asyncio.open_connection(proxy_host, proxy_port, ssl=ssl_context)
 
-        logging.info("三三ᕕ{ •̃_•̃ }ᕗ    ➤➤➤    %s" % token)
+        logging.info("(%s) 🏃 Ready!", token)
 
         proxy_writer.write(token.bytes)  # Send my identification
         await proxy_writer.drain()
 
         if await proxy_reader.read(7) != b"connect":
-            logging.info("stop being sus 𓆏")
-
-            # Spawn a new connection
-            asyncio.create_task(run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds))
+            logging.info("(%s) 🥜 Something went nuts.", token)
 
             proxy_writer.close()
-            return await proxy_writer.wait_closed()
+            await proxy_writer.wait_closed()
 
-        asyncio.create_task(run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds))
+            await asyncio.sleep(retry_delay_seconds)
+            await queue.put(1)  # Signal main() to spawn a new agent
+            return
 
+        await queue.put(1)  # Signal main() to spawn a new agent
         db_reader, db_writer = await asyncio.open_connection(db_host, db_port)
 
         proxy_writer.write(b"ready")
@@ -120,76 +130,65 @@ async def run_agent(proxy_host: str, proxy_port: int, db_host: str, db_port: int
         )
 
     except (OSError, asyncio.IncompleteReadError):
-        logging.info(
-            "{╥﹏╥} Connection Error, retrying in %.2f second(s)...", retry_delay_seconds
-        )
-
+        logging.info("(%s) 😭 Connection error, retrying in %.2f second(s)...", token, retry_delay_seconds)
         await asyncio.sleep(retry_delay_seconds)
-
-        asyncio.create_task(run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds))
+        await queue.put(1)  # Signal main() to retry
 
     except Exception as ex:
-        logging.info("（￣へ￣）   ➤➤➤   (%s) %s", token, ex)
+        logging.info("(%s) ❌ Exception: %s", token, ex)
 
     finally:
-        logging.info("(╯'□')╯︵ ┻━┻    ➤➤➤    %s" % token)
-
-        async with tasks_lock:
-            running_tasks.discard(task)
+        logging.info("(%s) 🗑 Discarding ..." % token)
 
 
 async def shutdown(loop):
-    logging.info(f"{{𓌻‸𓌻}} ᴜɢʜ...")
+    logging.info("️( -_•)︻デ═一💥 killing...")
 
     await asyncio.sleep(0.5)  # Allow logs to flush
 
-    async with tasks_lock:
-        tasks = list(running_tasks)
+    tasks = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
 
     for task in tasks:
         task.cancel()
 
     await asyncio.gather(*tasks, return_exceptions=True)
-
     loop.call_soon(loop.stop)
 
 
-# def track_task(task):
-#     async def remove_task():
-#         async with tasks_lock:
-#             running_tasks.discard(task)
-#
-#     task.add_done_callback(
-#         lambda t: asyncio.create_task(
-#             remove_task()
-#         )
-#     )
+async def spawn_agents(queue: asyncio.Queue, *args):
+    while True:
+        await queue.get()  # Wait for a signal to spawn an agent
+        asyncio.create_task(run_agent(*args, queue))
 
 
 async def main():
     args = parse_args()
     loop = asyncio.get_running_loop()
+    queue = asyncio.Queue()
 
     try:
+        # Start the initial set of agents
         for _ in range(args.min_threads):
-            # track_task(
-            asyncio.create_task(
-                run_agent(
-                    args.proxy_host,
-                    args.proxy_port,
-                    args.db_host,
-                    args.db_port,
-                    args.ssl,
-                    args.cert,
-                    args.retry_delay_seconds
-                )
-            )
-            # )
+            await queue.put(1)
 
-        await asyncio.Event().wait()
+        asyncio.create_task(
+            spawn_agents(
+                queue,
+                args.proxy_host,
+                args.proxy_port,
+                args.db_host,
+                args.db_port,
+                args.ssl,
+                args.cert,
+                args.retry_delay_seconds,
+            )
+        )
+
+        await asyncio.Event().wait()  # Keep the event loop running
 
     except asyncio.CancelledError:
         await shutdown(loop)
+
 
 
 if __name__ == "__main__":

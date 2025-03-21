@@ -24,11 +24,11 @@ class Agent:
 
 class Context:
     lock: asyncio.Lock
-    agents: dict[uuid.UUID, Agent]
+    agents: set[Agent]
 
     def __init__(self):
         self.lock = asyncio.Lock()
-        self.agents = {}
+        self.agents = set()
 
     async def is_empty(self):
         async with self.lock:
@@ -36,22 +36,26 @@ class Context:
 
     async def add_agent(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         token = uuid.UUID(bytes=await reader.read(16))
-        logging.info(f"🎉 new agent: %s:%d (%s)", *writer.transport.get_extra_info('peername'), token)
+        logging.info(f"🎉 new agent (%s): %s:%d", token, *writer.transport.get_extra_info('peername'))
+
+        agent = Agent(token, reader, writer)
 
         async with self.lock:
-            self.agents[token] = Agent(token, reader, writer)
+            self.agents.add(agent)
 
     async def pop_agent(self) -> Agent | None:
         while True:
             try:
                 async with self.lock:
-                    token, agent = self.agents.popitem()
+                    agent = self.agents.pop()
 
                 if agent.reader.at_eof():
+                    logging.info("🗑️ agent (%s) discarded", agent.token)
                     agent.writer.close()
                     await agent.writer.wait_closed()
                     continue
 
+                logging.info("🍾 agent (%s) popped", agent.token)
                 return agent
 
             except KeyError:
@@ -102,17 +106,23 @@ def parse_args():
     return parser.parse_args()
 
 async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
-    while True:
-        data = await source.read(4096)
+    try:
+        while True:
+            data = await source.read(4096)
+            if not data:
+                break
+            destination.write(data)
+            await destination.drain()
 
-        if not data:
-            break
+    except asyncio.IncompleteReadError:
+        logging.info("😢 unexpected EOF")
 
-        destination.write(data)
-        await destination.drain()
+    except ConnectionResetError:
+        logging.info("😩 connection reset")
 
-    destination.close()
-    await destination.wait_closed()
+    finally:
+        destination.close()
+        await destination.wait_closed()
 
 
 async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -127,7 +137,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     for i in range(10):  # max tries to wait for an agent
         agent = await context.pop_agent()
         if agent: break
+
+        logging.info("🍃 no agents available, retrying in 0.7s...")
         await asyncio.sleep(0.7)  # sleep 0.7s, waiting for an agent...
+    else:
+        logging.info("👻 no agents available.")
 
     if not agent:
         writer.close()
@@ -138,7 +152,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
     if await agent.reader.read(5) != b"ready":
         writer.close()
-        return await writer.wait_closed()
+        await writer.wait_closed()
+
+        agent.writer.close()
+        await agent.writer.wait_closed()
+
+        return
 
     await asyncio.gather(
         asyncio.create_task(
@@ -151,7 +170,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def shutdown(loop, servers):
-    logging.info(f"(𓌻‸𓌻) ᴜɢʜ...")
+    logging.info("️( -_•)︻デ═一💥 killing...")
 
     while not await context.is_empty():
         agent = await context.pop_agent()
@@ -164,7 +183,8 @@ async def shutdown(loop, servers):
         server.close()
         await server.wait_closed()
 
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    tasks = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
+
     for task in tasks:
         task.cancel()
 
