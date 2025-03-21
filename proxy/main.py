@@ -36,7 +36,7 @@ class Context:
 
     async def add_agent(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         token = uuid.UUID(bytes=await reader.read(16))
-        logging.info(f"🎉 new agent (%s): %s:%d", token, *writer.transport.get_extra_info('peername'))
+        logging.info(f"🎉 new agent (%s) %s:%d", token, *writer.transport.get_extra_info('peername'))
 
         agent = Agent(token, reader, writer)
 
@@ -114,23 +114,33 @@ def parse_args():
 
     return parser.parse_args()
 
-async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
+async def forward(agent_token: uuid.UUID, source_peername: tuple[str, int], source: asyncio.StreamReader, destination: asyncio.StreamWriter):
     try:
         while True:
             data = await source.read(4096)
+
             if not data:
                 break
+
             destination.write(data)
             await destination.drain()
-
     except asyncio.IncompleteReadError:
-        logging.info("😢 Unexpected EOF")
+        logging.info(
+            "😢 { (%s) source: %s:%d <-> destination: %s:%d } Unexpected EOF",
+            agent_token, *source_peername, *destination.transport.get_extra_info('peername')
+        )
 
     except ConnectionResetError:
-        logging.info("😩 Connection reset")
+        logging.info(
+            "😩 { (%s) source: %s:%d <-> destination: %s:%d } Connection reset",
+            agent_token, *source_peername, *destination.transport.get_extra_info('peername')
+        )
 
     except Exception:
-        logging.info("👽 Something crazy happened.")
+        logging.info(
+            "👽 { (%s) source: %s:%d <-> destination: %s:%d } Something crazy happened",
+            agent_token, *source_peername, *destination.transport.get_extra_info('peername')
+        )
 
     finally:
         destination.close()
@@ -142,7 +152,8 @@ async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, wait_agent_max_tries: int, wait_agent_sleep_time: float):
-    logging.info("🎉 new client %s:%d", *writer.transport.get_extra_info('peername'))
+    client_peername = writer.transport.get_extra_info('peername')
+    logging.info("🎉 new client %s:%d", *client_peername)
 
     agent = None
 
@@ -150,7 +161,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         agent = await context.pop_agent()
         if agent: break
 
-        logging.info("🍃 no agents available, retrying in %.2f second(s)...", wait_agent_sleep_time)
+        logging.info("🍃 no agents available, retrying in %.2f sec(s)...", wait_agent_sleep_time)
         await asyncio.sleep(0.7)  # sleep <wait_agent_sleep_time> seconds, waiting for an agent...
     else:
         logging.info("👻 no agents available.")
@@ -161,6 +172,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
     agent.writer.write(b"connect")
     await agent.writer.drain()
+
+    agent_peername = agent.writer.transport.get_extra_info('peername')
 
     if await agent.reader.read(5) != b"ready":
         writer.close()
@@ -174,14 +187,17 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     try:
         await asyncio.gather(
             asyncio.create_task(
-                forward(reader, agent.writer)
+                forward(agent.token, client_peername, reader, agent.writer)
             ),
             asyncio.create_task(
-                forward(agent.reader, writer)
+                forward(agent.token, agent_peername, agent.reader, writer)
             )
         )
     except Exception:
-        logging.info("🛸 Something crazy happened.")
+        logging.info(
+            "🛸 { agent %s:%d (%s) <-> client %s:%d } Something crazy happened.",
+            *agent_peername, agent.token, client_peername
+        )
 
         agent.writer.close()
         await agent.writer.wait_closed()

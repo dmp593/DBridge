@@ -77,23 +77,33 @@ def parse_args():
     return parser.parse_args()
 
 
-async def forward(source: asyncio.StreamReader, destination: asyncio.StreamWriter):
+async def forward(agent_token: uuid.UUID, source_peername: tuple[str, int], source: asyncio.StreamReader, destination: asyncio.StreamWriter):
     try:
         while True:
             data = await source.read(4096)
+
             if not data:
                 break
+
             destination.write(data)
             await destination.drain()
-
     except asyncio.IncompleteReadError:
-        logging.info("😢 unexpected EOF")
+        logging.info(
+            "(%s) 😢 { source: %s:%d <-> destination: %s:%d } Unexpected EOF",
+            agent_token, *source_peername, *destination.transport.get_extra_info('peername')
+        )
 
     except ConnectionResetError:
-        logging.info("😩 connection reset")
+        logging.info(
+            "(%s) 😩 { source: %s:%d <-> destination: %s:%d } Connection reset",
+            agent_token, *source_peername, *destination.transport.get_extra_info('peername')
+        )
 
     except Exception:
-        logging.info("👽 Something crazy happened.")
+        logging.info(
+            "(%s) 👽 { source: %s:%d <-> destination: %s:%d } Something crazy happened",
+            agent_token, *source_peername, *destination.transport.get_extra_info('peername')
+        )
 
     finally:
         destination.close()
@@ -128,14 +138,20 @@ async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, ret
         proxy_writer.write(b"ready")
         await proxy_writer.drain()
 
+        db_peername = db_writer.transport.get_extra_info('peername')
+        proxy_peername = proxy_writer.transport.get_extra_info('peername')
+
         try:
             await asyncio.gather(
-                forward(proxy_reader, db_writer),  # Proxy → Agent → DB
-                forward(db_reader, proxy_writer)   # DB → Agent → Proxy
+                forward(token, proxy_peername, proxy_reader, db_writer),  # Proxy → Agent → DB
+                forward(token, db_peername, db_reader, proxy_writer)   # DB → Agent → Proxy
             )
 
         except Exception:
-            logging.info("🛸 Something crazy happened.")
+            logging.info(
+                "(%s) 🛸 { proxy %s:%d <-> database %s:%d } Something crazy happened.",
+                token, *proxy_peername, *db_peername
+            )
 
             db_writer.close()
             await db_writer.wait_closed()
@@ -144,7 +160,7 @@ async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, ret
             await proxy_writer.wait_closed()
 
     except (OSError, asyncio.IncompleteReadError):
-        logging.info("(%s) 😭 Connection error, retrying in %.2f second(s)...", token, retry_delay_seconds)
+        logging.info("(%s) 😭 Connection error, retrying in %.2f sec(s)...", token, retry_delay_seconds)
         await asyncio.sleep(retry_delay_seconds)
         await queue.put(1)  # Signal to spawn a new agent
 
