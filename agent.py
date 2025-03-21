@@ -60,6 +60,8 @@ def parse_args():
     default_proxy_host = os.getenv("PROXY_HOST")
     default_proxy_port = parse(to=int, value=os.getenv("PROXY_PORT"), or_default=7000)
 
+    default_health_port = parse(to=int, value=os.getenv("HEALTH_PORT"), or_default=4000)
+
     default_database_host = os.getenv("DATABASE_HOST", "localhost")
     default_database_port = parse(to=int, value=os.getenv("DATABASE_PORT"), or_default=None)
 
@@ -74,6 +76,9 @@ def parse_args():
 
     parser.add_argument("-p", "--proxy-port", type=int, default=default_proxy_port,
                         help=f"Proxy server port (default: {default_proxy_port})")
+
+    parser.add_argument("-e", "--health-port", type=int, default=default_health_port,
+                        help=f"Health prob port (default: {default_health_port})")
 
     parser.add_argument("-d", "--db-host", default=default_database_host,
                         help=f"Database host (default: {default_database_host})")
@@ -127,6 +132,14 @@ async def forward(agent_token: uuid.UUID, source_peername: tuple[str, int], sour
     finally:
         destination.close()
         await destination.wait_closed()
+
+
+async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    writer.write("💚 Still slaying and thriving, PERIOD! 💅".encode())
+    await writer.drain()
+
+    writer.close()
+    await writer.wait_closed()
 
 
 async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds, queue: asyncio.Queue):
@@ -190,10 +203,20 @@ async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, ret
         logging.info("(%s) 🗑 Discarding ..." % token)
 
 
-async def shutdown(loop):
+async def spawn_agents(queue: asyncio.Queue, *args):
+    while True:
+        await queue.get()  # Wait for a signal to spawn an agent
+        asyncio.create_task(run_agent(*args, queue))
+
+
+async def shutdown(loop, health_server):
     logging.info("️( -_•)︻デ═一💥 killing...")
 
     await asyncio.sleep(0.5)  # Allow logs to flush
+
+    if health_server:
+        health_server.close()
+        await health_server.wait_closed()
 
     tasks = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
 
@@ -204,16 +227,13 @@ async def shutdown(loop):
     loop.call_soon(loop.stop)
 
 
-async def spawn_agents(queue: asyncio.Queue, *args):
-    while True:
-        await queue.get()  # Wait for a signal to spawn an agent
-        asyncio.create_task(run_agent(*args, queue))
-
 
 async def main():
     args = parse_args()
     loop = asyncio.get_running_loop()
     queue = asyncio.Queue()
+
+    health_server = None
 
     try:
         for _ in range(args.min_threads):  # Start the initial set of agents
@@ -232,11 +252,15 @@ async def main():
             )
         )
 
+        health_server = await asyncio.start_server(
+            handle_health, 'localhost', args.health_port
+        )
+
         await asyncio.Event().wait()  # Keep the event loop running
 
     except asyncio.CancelledError:
         logging.info("🛑 Agent was cancelled.")
-        await shutdown(loop)
+        await shutdown(loop, health_server)
 
 
 if __name__ == "__main__":

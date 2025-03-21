@@ -254,8 +254,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await writer.wait_closed()
 
 
-async def shutdown(loop, servers):
+async def shutdown(loop, servers: list):
     logging.info("️( -_•)︻デ═一💥 killing...")
+
+    await asyncio.sleep(0.5)  # Allow logs to flush
 
     while not await context.is_empty():
         agent = await context.pop_agent()
