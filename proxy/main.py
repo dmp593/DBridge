@@ -85,6 +85,9 @@ def parse_args():
     default_port_agents = parse(to=int, value=os.getenv("PORT_AGENTS"), or_default=7000)
     default_port_clients = parse(to=int, value=os.getenv("PORT_CLIENTS"), or_default=9000)
 
+    default_wait_agent_max_tries = parse(to=int, value=os.getenv("MAX_TRIES"), or_default=10)
+    default_wait_agent_retry_sleep_time = parse(to=float, value=os.getenv("SLEEP_TIME"), or_default=0.7)
+
     parser.add_argument("-x", "--host", default=default_host,
                         help=f"Host to listen on (default: {default_host})")
 
@@ -93,6 +96,12 @@ def parse_args():
 
     parser.add_argument("-p", "--port-clients", type=int, default=default_port_clients,
                         help=f"Port for client connections (default: {default_port_clients})")
+
+    parser.add_argument("-t", "--wait-agent-max-tries", type=int, default=default_wait_agent_max_tries,
+                        help=f"Maximum number of attempts to find an agent (default: {default_wait_agent_max_tries})")
+
+    parser.add_argument("-z", "--wait-agent-sleep-time", type=float, default=default_wait_agent_retry_sleep_time,
+                        help=f"Time to sleep between retries when no agent is available (default: {default_wait_agent_retry_sleep_time})")
 
     parser.add_argument("-s", "--ssl", action="store_true",
                         help="Enable SSL for secure connections")
@@ -129,17 +138,17 @@ async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     await context.add_agent(reader, writer)
 
 
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, wait_agent_max_tries: int, wait_agent_sleep_time: float):
     logging.info("🎉 new client %s:%d", *writer.transport.get_extra_info('peername'))
 
     agent = None
 
-    for i in range(10):  # max tries to wait for an agent
+    for i in range(wait_agent_max_tries):  # max tries to wait for an agent
         agent = await context.pop_agent()
         if agent: break
 
-        logging.info("🍃 no agents available, retrying in 0.7s...")
-        await asyncio.sleep(0.7)  # sleep 0.7s, waiting for an agent...
+        logging.info("🍃 no agents available, retrying in %.2f second(s)...", wait_agent_sleep_time)
+        await asyncio.sleep(0.7)  # sleep <wait_agent_sleep_time> seconds, waiting for an agent...
     else:
         logging.info("👻 no agents available.")
 
@@ -203,8 +212,16 @@ async def main():
         ssl_context.load_cert_chain(certfile=args.cert, keyfile=args.key)
 
     servers = await asyncio.gather(
-        asyncio.start_server(handle_agent, args.host, args.port_agents, ssl=ssl_context),
-        asyncio.start_server(handle_client, args.host, args.port_clients, ssl=ssl_context)
+        asyncio.start_server(
+            handle_agent, args.host, args.port_agents, ssl=ssl_context
+        ),
+
+        asyncio.start_server(
+            lambda r, w: handle_client(r, w, args.wait_agent_max_tries, args.wait_agent_sleep_time),
+            args.host,
+            args.port_clients,
+            ssl=ssl_context
+        )
     )
 
     try:
