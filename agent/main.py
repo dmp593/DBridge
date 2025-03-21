@@ -115,10 +115,10 @@ async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, ret
             await proxy_writer.wait_closed()
 
             await asyncio.sleep(retry_delay_seconds)
-            await queue.put(1)  # Signal main() to spawn a new agent
+            await queue.put(1)  # Signal to spawn a new agent
             return
 
-        await queue.put(1)  # Signal main() to spawn a new agent
+        await queue.put(1)  # Signal to spawn a new agent
         db_reader, db_writer = await asyncio.open_connection(db_host, db_port)
 
         proxy_writer.write(b"ready")
@@ -132,7 +132,7 @@ async def run_agent(proxy_host, proxy_port, db_host, db_port, use_ssl, cert, ret
     except (OSError, asyncio.IncompleteReadError):
         logging.info("(%s) 😭 Connection error, retrying in %.2f second(s)...", token, retry_delay_seconds)
         await asyncio.sleep(retry_delay_seconds)
-        await queue.put(1)  # Signal main() to retry
+        await queue.put(1)  # Signal to spawn a new agent
 
     except Exception as ex:
         logging.info("(%s) ❌ Exception: %s", token, ex)
@@ -167,8 +167,7 @@ async def main():
     queue = asyncio.Queue()
 
     try:
-        # Start the initial set of agents
-        for _ in range(args.min_threads):
+        for _ in range(args.min_threads):  # Start the initial set of agents
             await queue.put(1)
 
         asyncio.create_task(
