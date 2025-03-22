@@ -119,6 +119,29 @@ def parse_bool(value: typing.Any, or_default: typing.Any | None = None) -> typin
                 return or_default
 
 
+def validate_wait_agent_retry_interval(value):
+    try:
+        f_value = float(value)
+        if f_value <= 0 or f_value > 300:
+            raise argparse.ArgumentTypeError("must be > 0 and <= 300")
+        return f_value
+    except ValueError:
+        raise argparse.ArgumentTypeError("Invalid float value.")
+
+
+def validate_zombies_clean_interval(value):
+    if value == "off":
+        return 0
+
+    try:
+        f_value = float(value)
+        if f_value < 0 or f_value > 300:
+            raise argparse.ArgumentTypeError("must be >= 0 and <= 300")
+        return f_value
+    except ValueError:
+        raise argparse.ArgumentTypeError("Invalid float value.")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Proxy server for forwarding connections.")
 
@@ -134,7 +157,7 @@ def parse_args():
     default_wait_agent_max_tries = parse(to=int, value=os.getenv("WAIT_AGENT_MAX_TRIES"), or_default=10)
     default_wait_agent_retry_interval = parse(to=float, value=os.getenv("WAIT_AGENT_RETRY_INTERVAL"), or_default=0.7)
 
-    default_zombies_clean_interval=parse(to=float, value=os.getenv("ZOMBIES_CLEAN_INTERVAL"), or_default=15)
+    default_zombies_clean_interval=parse(to=float, value=os.getenv("ZOMBIES_CLEAN_INTERVAL"), or_default=0)
 
     default_use_ssl = parse_bool(value=os.getenv("USE_SSL"), or_default=False)
     default_ssl_cert = os.getenv("SSL_CERT", None)
@@ -164,11 +187,11 @@ def parse_args():
     parser.add_argument("-t", "--wait-agent-max-tries", type=int, default=default_wait_agent_max_tries,
                         help=f"Maximum number of attempts to find an agent (default: {default_wait_agent_max_tries})")
 
-    parser.add_argument("-j", "--wait-agent-retry-interval", type=float, default=default_wait_agent_retry_interval,
-                        help=f"Time (secs) to sleep between retries when no agent is available (default: {default_wait_agent_retry_interval})")
+    parser.add_argument("-j", "--wait-agent-retry-interval", type=validate_wait_agent_retry_interval, default=default_wait_agent_retry_interval,
+                        help=f"Time (secs) to sleep between retries when no agent is available (default: {default_wait_agent_retry_interval:.2f})")
 
-    parser.add_argument("-z", "--zombies-clean-interval", type=float, default=default_zombies_clean_interval,
-                        help=f"Interval time (secs) for routine that cleans zombie agents (default: {default_zombies_clean_interval})")
+    parser.add_argument("-z", "--zombies-clean-interval", type=validate_zombies_clean_interval, default=default_zombies_clean_interval,
+                        help=f"Interval (secs) for cleaning zombie agents. Set to 0 to disable automatic cleanup: zombies will only be discarded only when getting an available agent. (Default: {default_zombies_clean_interval:.2f})")
 
     parser.add_argument("-s", "--ssl", action="store_true", default=default_use_ssl,
                         help="Enable SSL for secure connections (default: no)")
@@ -387,9 +410,8 @@ async def main():
         )
     )
 
-    asyncio.create_task(
-        context.clean_zombies(args.zombies_clean_interval)
-    )
+    if args.zombies_clean_interval > 0:
+        asyncio.create_task(context.clean_zombies(args.zombies_clean_interval))
 
     try:
         logging.info("三三ᕕ( ᐛ )ᕗ")
@@ -404,4 +426,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("🔫 Interrupted by user.")
+        logging.info("⌨️ Interrupted by user.")
