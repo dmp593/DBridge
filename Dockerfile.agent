@@ -20,5 +20,6 @@ WORKDIR /app
 COPY agent.py agent.py
 
 EXPOSE 4000
+EXPOSE 7000
 
 CMD ["python", "agent.py"]
