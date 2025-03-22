@@ -135,7 +135,7 @@ async def forward(agent_token: uuid.UUID, source_peername: tuple[str, int], sour
 
 
 async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    writer.write("💚 Still slaying and thriving, PERIOD! 💅".encode())
+    writer.write("💅 Slaying and thriving, PERIOD.".encode())
     await writer.drain()
 
     writer.close()
