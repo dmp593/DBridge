@@ -24,15 +24,15 @@ class Agent:
 
 class Context:
     lock: asyncio.Lock
-    agents: set[Agent]
+    agents: list[Agent]
 
     def __init__(self):
         self.lock = asyncio.Lock()
-        self.agents = set()
+        self.agents = []
 
-    async def is_empty(self):
+    async def length(self):
         async with self.lock:
-            return len(self.agents) == 0
+            return len(self.agents)
 
     async def add_agent(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         token = uuid.UUID(bytes=await reader.read(16))
@@ -41,16 +41,43 @@ class Context:
         agent = Agent(token, reader, writer)
 
         async with self.lock:
-            self.agents.add(agent)
+            self.agents.append(agent)
+
+    async def clean_zombies(self, sleep_interval: float):
+        while True:
+            await asyncio.sleep(sleep_interval)
+
+            closing_zombies = []
+
+            async with self.lock:
+                agents = list(self.agents)
+
+            for agent in agents:
+                if agent.reader.at_eof():
+                    logging.info("🧟 zombie agent (%s) detected.", agent.token)
+
+                    try:
+                        async with self.lock:
+                            self.agents.remove(agent)  # 🗑 discarding!
+
+                        agent.writer.close()
+                        closing_zombies.append(agent.writer.wait_closed())
+
+                    except ValueError:  # agent already popped by another thread...
+                        logging.info("🧼 zombie agent (%s) already gone.", agent.token)
+
+            await asyncio.gather(*closing_zombies, return_exceptions=True)
+            logging.info("🗑️ cleaned %d zombie agent(s)", len(closing_zombies))
+
 
     async def pop_agent(self) -> Agent | None:
         while True:
             try:
                 async with self.lock:
-                    agent = self.agents.pop()
+                    agent = self.agents.pop(0)
 
                 if agent.reader.at_eof():
-                    logging.info("🗑️ agent (%s) discarded", agent.token)
+                    logging.info("🗑️ zombie agent (%s) discarded", agent.token)
                     agent.writer.close()
                     await agent.writer.wait_closed()
                     continue
@@ -58,7 +85,7 @@ class Context:
                 logging.info("🍾 agent (%s) popped", agent.token)
                 return agent
 
-            except KeyError:
+            except IndexError:  # no agents left.
                 return None
 
 
@@ -105,7 +132,9 @@ def parse_args():
     default_allowed_clients = os.getenv("ALLOWED_CLIENTS", "*")
 
     default_wait_agent_max_tries = parse(to=int, value=os.getenv("WAIT_AGENT_MAX_TRIES"), or_default=10)
-    default_wait_agent_retry_sleep_time = parse(to=float, value=os.getenv("WAIT_AGENT_SLEEP_TIME"), or_default=0.7)
+    default_wait_agent_retry_interval = parse(to=float, value=os.getenv("WAIT_AGENT_RETRY_INTERVAL"), or_default=0.7)
+
+    default_zombies_clean_interval=parse(to=float, value=os.getenv("ZOMBIES_CLEAN_INTERVAL"), or_default=15)
 
     default_use_ssl = parse_bool(value=os.getenv("USE_SSL"), or_default=False)
     default_ssl_cert = os.getenv("SSL_CERT", None)
@@ -135,8 +164,11 @@ def parse_args():
     parser.add_argument("-t", "--wait-agent-max-tries", type=int, default=default_wait_agent_max_tries,
                         help=f"Maximum number of attempts to find an agent (default: {default_wait_agent_max_tries})")
 
-    parser.add_argument("-z", "--wait-agent-sleep-time", type=float, default=default_wait_agent_retry_sleep_time,
-                        help=f"Time to sleep between retries when no agent is available (default: {default_wait_agent_retry_sleep_time})")
+    parser.add_argument("-j", "--wait-agent-retry-interval", type=float, default=default_wait_agent_retry_interval,
+                        help=f"Time (secs) to sleep between retries when no agent is available (default: {default_wait_agent_retry_interval})")
+
+    parser.add_argument("-z", "--zombies-clean-interval", type=float, default=default_zombies_clean_interval,
+                        help=f"Interval time (secs) for routine that cleans zombie agents (default: {default_zombies_clean_interval})")
 
     parser.add_argument("-s", "--ssl", action="store_true", default=default_use_ssl,
                         help="Enable SSL for secure connections (default: no)")
@@ -191,7 +223,7 @@ async def handle_liveness(reader: asyncio.StreamReader, writer: asyncio.StreamWr
 
 
 async def handle_readiness(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    if await context.is_empty():
+    if await context.length() == 0:
         message = "⚠️ Not ready! Waiting for agents to join..."
     else:
         message = "🚀 Ready to forward packets like a pro!"
@@ -221,7 +253,7 @@ async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     await context.add_agent(reader, writer)
 
 
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allowed_hosts: list[str], wait_agent_max_tries: int, wait_agent_sleep_time: float):
+async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allowed_hosts: list[str], wait_agent_max_tries: int, wait_agent_retry_interval: float):
     client_peername = writer.transport.get_extra_info('peername')
 
     if '*' not in allowed_hosts and client_peername[0] not in allowed_hosts:
@@ -240,12 +272,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
     agent = None
 
-    for i in range(wait_agent_max_tries):  # max tries to wait for an agent
+    for i in range(wait_agent_max_tries):
         agent = await context.pop_agent()
         if agent: break
 
-        logging.info("🍃 no agents available, retrying in %.2f sec(s)...", wait_agent_sleep_time)
-        await asyncio.sleep(0.7)  # sleep <wait_agent_sleep_time> seconds, waiting for an agent...
+        logging.info("🍃 no agents available, retrying in %.2f sec(s)...", wait_agent_retry_interval)
+        await asyncio.sleep(wait_agent_retry_interval)
     else:
         logging.info("👻 no agents available.")
 
@@ -260,10 +292,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
     if await agent.reader.read(5) != b"ready":
         writer.close()
-        await writer.wait_closed()
-
         agent.writer.close()
-        await agent.writer.wait_closed()
+
+        await asyncio.gather(
+            writer.wait_closed(),
+            agent.writer.wait_closed(),
+            return_exceptions=True
+        )
 
         return
 
@@ -283,10 +318,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         )
 
         agent.writer.close()
-        await agent.writer.wait_closed()
-
         writer.close()
-        await writer.wait_closed()
+
+        await asyncio.gather(
+            agent.writer.wait_closed(),
+            writer.wait_closed(),
+            return_exceptions=True
+        )
 
 
 async def shutdown(loop, servers: tuple):
@@ -294,24 +332,25 @@ async def shutdown(loop, servers: tuple):
 
     await asyncio.sleep(0.5)  # Allow logs to flush
 
-    while not await context.is_empty():
+    closing_sockets: list[typing.Coroutine] = []
+
+    while await context.length() != 0:
         agent = await context.pop_agent()
 
         if agent:
             agent.writer.close()
-            await agent.writer.wait_closed()
+            closing_sockets.append(agent.writer.wait_closed())
 
     for server in servers:
         server.close()
-        await server.wait_closed()
+        closing_sockets.append(server.wait_closed())
 
     tasks = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
 
     for task in tasks:
         task.cancel()
 
-    await asyncio.gather(*tasks, return_exceptions=True)
-
+    await asyncio.gather(*closing_sockets, *tasks, return_exceptions=True)
     loop.call_soon(loop.stop)
 
 
@@ -341,11 +380,15 @@ async def main():
         ),
 
         asyncio.start_server(
-            lambda r, w: handle_client(r, w, args.allow_client, args.wait_agent_max_tries, args.wait_agent_sleep_time),
+            lambda r, w: handle_client(r, w, args.allow_client, args.wait_agent_max_tries, args.wait_agent_retry_interval),
             args.host,
             args.port_clients,
             ssl=ssl_context
         )
+    )
+
+    asyncio.create_task(
+        context.clean_zombies(args.zombies_clean_interval)
     )
 
     try:

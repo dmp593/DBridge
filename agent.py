@@ -156,14 +156,22 @@ async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, 
             logging.info("(%s) 🥜 Something went nuts", token)
 
             proxy_writer.close()
-            await proxy_writer.wait_closed()
 
-            await asyncio.sleep(retry_delay_seconds)
-            await queue.put(1)  # Signal to spawn a new agent
+            await asyncio.gather(
+                proxy_writer.wait_closed(),
+                asyncio.sleep(retry_delay_seconds),
+                queue.put(1)  # Signal to spawn a new agent
+            )
+
             return
 
-        await queue.put(1)  # Signal to spawn a new agent
-        db_reader, db_writer = await asyncio.open_connection(db_host, db_port)
+        _, db = await asyncio.gather(
+            queue.put(1),  # Signal to spawn a new agent,
+            asyncio.open_connection(db_host, db_port),
+            return_exceptions=True
+        )
+
+        db_reader, db_writer = db
 
         proxy_writer.write(b"ready")
         await proxy_writer.drain()
@@ -184,10 +192,13 @@ async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, 
             )
 
             db_writer.close()
-            await db_writer.wait_closed()
-
             proxy_writer.close()
-            await proxy_writer.wait_closed()
+
+            await asyncio.gather(
+                db_writer.wait_closed(),
+                proxy_writer.wait_closed(),
+                return_exceptions=True
+            )
 
     except (OSError, asyncio.IncompleteReadError):
         logging.info("(%s) 😭 Connection error, retrying in %.2f sec(s)...", token, retry_delay_seconds)
@@ -236,8 +247,11 @@ async def main():
     health_server = None
 
     try:
-        for _ in range(args.min_threads):  # Start the initial set of agents
-            await queue.put(1)
+        # Start the initial set of agents
+        await asyncio.gather(
+            *[queue.put(1) for _ in range(args.min_threads)],
+            return_exceptions=True
+        )
 
         asyncio.create_task(
             spawn_agents(
