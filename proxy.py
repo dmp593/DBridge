@@ -191,7 +191,7 @@ def parse_args():
                         help=f"Time (secs) to sleep between retries when no agent is available (default: {default_wait_agent_retry_interval:.2f})")
 
     parser.add_argument("-z", "--zombies-clean-interval", type=validate_zombies_clean_interval, default=default_zombies_clean_interval,
-                        help=f"Interval (secs) for cleaning zombie agents. Set to 0 to disable automatic cleanup: zombies will only be discarded only when getting an available agent. (Default: {default_zombies_clean_interval:.2f})")
+                        help=f"Interval (secs) for cleaning zombie agents. Set to 0 to disable automatic cleanup: zombies will only be discarded when getting an available agent. (Default: {default_zombies_clean_interval:.2f})")
 
     parser.add_argument("-s", "--ssl", action="store_true", default=default_use_ssl,
                         help="Enable SSL for secure connections (default: no)")
