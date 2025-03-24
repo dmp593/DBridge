@@ -142,7 +142,7 @@ def validate_zombies_clean_interval(value):
         raise argparse.ArgumentTypeError("Invalid float value.")
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Proxy server for forwarding connections.")
 
     default_host = os.getenv("HOST", "0.0.0.0")
