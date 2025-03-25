@@ -67,8 +67,9 @@ class Context:
                         logging.info("🧼 zombie agent (%s) already gone.", agent.token)
 
             await asyncio.gather(*closing_zombies, return_exceptions=True)
-            logging.info("🗑️ cleaned %d zombie agent(s)", len(closing_zombies))
 
+            if len(closing_zombies) > 0:
+                logging.info("🗑️ cleaned %d zombie agent(s)", len(closing_zombies))
 
     async def pop_agent(self) -> Agent | None:
         while True:

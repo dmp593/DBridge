@@ -200,7 +200,7 @@ async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, 
                 return_exceptions=True
             )
 
-    except (OSError, asyncio.IncompleteReadError):
+    except (OSError, asyncio.IncompleteReadError) as e:
         logging.info("(%s) 😭 Connection error, retrying in %.2f sec(s)...", token, retry_delay_seconds)
         await asyncio.sleep(retry_delay_seconds)
         await queue.put(1)  # Signal to spawn a new agent
