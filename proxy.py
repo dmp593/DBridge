@@ -5,7 +5,7 @@ import logging
 import uuid
 import typing
 import ssl
-
+from asyncio import CancelledError
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -16,10 +16,50 @@ class Agent:
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
 
-    def __init__(self, token: uuid.UUID, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    ping_pong_interval: float
+    task_ping_pong: asyncio.Task | None = None
+
+    def __init__(self, token: uuid.UUID, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, ping_pong_interval: float):
         self.token = token
         self.reader = reader
         self.writer = writer
+        self.ping_pong_interval = ping_pong_interval
+
+    async def start_ping_pong(self):
+        if self.task_ping_pong:
+            await self.stop_ping_pong()
+
+        self.task_ping_pong = asyncio.create_task(self.run_ping_pong())
+
+    async def run_ping_pong(self):
+        while True:
+            try:
+                self.writer.write(b"ping")
+                await self.writer.drain()
+
+                data = await asyncio.wait_for(self.reader.read(4), timeout=5)
+                if data != b"pong": raise Exception()
+
+                logging.info("🏓 ping-pong agent (%s)", self.token)
+
+                await asyncio.sleep(self.ping_pong_interval)
+
+            except CancelledError:
+                logging.info("🏓 Stopping ping-pong with agent (%s)", self.token)
+                break
+
+            except Exception:
+                logging.info("🏓 Not a ping-pong. Error on agent (%s)", self.token)
+
+                self.writer.close()
+                await self.writer.wait_closed()
+
+                break
+
+    async def stop_ping_pong(self):
+        self.task_ping_pong.cancel()
+        await self.task_ping_pong
+        self.task_ping_pong = None
 
 
 class Context:
@@ -34,11 +74,12 @@ class Context:
         async with self.lock:
             return len(self.agents)
 
-    async def add_agent(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def add_agent(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, ping_pong_interval: float):
         token = uuid.UUID(bytes=await reader.read(16))
         logging.info(f"🎉 new agent (%s) %s:%d", token, *writer.transport.get_extra_info('peername'))
 
-        agent = Agent(token, reader, writer)
+        agent = Agent(token, reader, writer, ping_pong_interval)
+        await agent.start_ping_pong()
 
         async with self.lock:
             self.agents.append(agent)
@@ -76,6 +117,8 @@ class Context:
             try:
                 async with self.lock:
                     agent = self.agents.pop(0)
+
+                await agent.stop_ping_pong()
 
                 if agent.reader.at_eof():
                     logging.info("🗑️ zombie agent (%s) discarded", agent.token)
@@ -143,6 +186,16 @@ def validate_zombies_clean_interval(value):
         raise argparse.ArgumentTypeError("Invalid float value.")
 
 
+def validate_ping_pong_interval(value):
+    try:
+        f_value = float(value)
+        if f_value <= 0 or f_value >= 30:
+            raise argparse.ArgumentTypeError("must be > 0 and < 30")
+        return f_value
+    except ValueError:
+        raise argparse.ArgumentTypeError("Invalid float value.")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Proxy server for forwarding connections.")
 
@@ -159,6 +212,8 @@ def parse_args() -> argparse.Namespace:
     default_wait_agent_retry_interval = parse(to=float, value=os.getenv("WAIT_AGENT_RETRY_INTERVAL"), or_default=0.7)
 
     default_zombies_clean_interval=parse(to=float, value=os.getenv("ZOMBIES_CLEAN_INTERVAL"), or_default=0)
+
+    default_ping_pong_interval_seconds = parse(to=float, value=os.getenv("PING_PONG_INTERVAL_SECONDS"), or_default=21)
 
     default_use_ssl = parse_bool(value=os.getenv("USE_SSL"), or_default=False)
     default_ssl_cert = os.getenv("SSL_CERT", None)
@@ -193,6 +248,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("-z", "--zombies-clean-interval", type=validate_zombies_clean_interval, default=default_zombies_clean_interval,
                         help=f"Interval (secs) for cleaning zombie agents. Set to 0 to disable automatic cleanup: zombies will only be discarded when getting an available agent. (Default: {default_zombies_clean_interval:.2f})")
+
+    parser.add_argument("-u", "--ping-pong-interval", type=validate_ping_pong_interval, default=default_ping_pong_interval_seconds,
+                        help=f"Interval (secs) to do a ping-pong to keep connection alive between the proxy and the agents. (Default: {default_ping_pong_interval_seconds:.2f})")
 
     parser.add_argument("-s", "--ssl", action="store_true", default=default_use_ssl,
                         help="Enable SSL for secure connections (default: no)")
@@ -239,7 +297,7 @@ async def forward(agent_token: uuid.UUID, source_peername: tuple[str, int], sour
 
 
 async def handle_liveness(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    writer.write("🚀 Alive and forwarding packets like a champ!".encode())
+    writer.write("🚀 alive and forwarding packets like a champ!".encode())
     await writer.drain()
 
     writer.close()
@@ -248,9 +306,9 @@ async def handle_liveness(reader: asyncio.StreamReader, writer: asyncio.StreamWr
 
 async def handle_readiness(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     if await context.length() == 0:
-        message = "⚠️ Not ready! Waiting for agents to join..."
+        message = "⚠️ not ready! waiting for agents to join..."
     else:
-        message = "🚀 Ready to forward packets like a pro!"
+        message = "🚀 ready to forward packets like a pro!"
 
     writer.write(message.encode("utf-8"))
     await writer.drain()
@@ -259,7 +317,7 @@ async def handle_readiness(reader: asyncio.StreamReader, writer: asyncio.StreamW
     await writer.wait_closed()
 
 
-async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allowed_hosts: list[str]):
+async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allowed_hosts: list[str], ping_pong_interval: float):
     agent_peername = writer.transport.get_extra_info('peername')
 
     if '*' not in allowed_hosts and agent_peername[0] not in allowed_hosts:
@@ -274,7 +332,7 @@ async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 
         return
 
-    await context.add_agent(reader, writer)
+    await context.add_agent(reader, writer, ping_pong_interval)
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allowed_hosts: list[str], wait_agent_max_tries: int, wait_agent_retry_interval: float):
@@ -327,6 +385,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         return
 
     try:
+        logging.info(
+            "💿 { agent %s:%d (%s) <-> client %s:%d } started",
+            *agent_peername, agent.token, *client_peername
+        )
+
         await asyncio.gather(
             asyncio.create_task(
                 forward(agent.token, client_peername, reader, agent.writer)
@@ -335,10 +398,15 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 forward(agent.token, agent_peername, agent.reader, writer)
             )
         )
+
+        logging.info(
+            "🏁 { agent %s:%d (%s) <-> client %s:%d } finished",
+            *agent_peername, agent.token, *client_peername
+        )
     except Exception:
         logging.info(
-            "🛸 { agent %s:%d (%s) <-> client %s:%d } Something crazy happened.",
-            *agent_peername, agent.token, client_peername
+            "🛸 { agent %s:%d (%s) <-> client %s:%d } Something crazy happened",
+            *agent_peername, agent.token, *client_peername
         )
 
         agent.writer.close()
@@ -397,7 +465,7 @@ async def main():
         ),
 
         asyncio.start_server(
-            lambda r, w: handle_agent(r, w, args.allow_agent),
+            lambda r, w: handle_agent(r, w, args.allow_agent, args.ping_pong_interval),
             args.host,
             args.port_agents,
             ssl=ssl_context

@@ -135,7 +135,7 @@ async def forward(agent_token: uuid.UUID, source_peername: tuple[str, int], sour
 
 
 async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    writer.write("💅 Slaying and thriving, PERIOD.".encode())
+    writer.write("💅 slaying and thriving, PERIOD.".encode())
     await writer.drain()
 
     writer.close()
@@ -143,17 +143,31 @@ async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds, queue: asyncio.Queue):
+    proxy_writer = None
+    db_writer = None
+
     try:
         ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
         proxy_reader, proxy_writer = await asyncio.open_connection(proxy_host, proxy_port, ssl=ssl_context)
 
-        logging.info("(%s) 🏃 Ready!", token)
+        logging.info("(%s) 🏃 ready!", token)
 
         proxy_writer.write(token.bytes)  # Send my identification
         await proxy_writer.drain()
 
-        if await proxy_reader.read(7) != b"connect":
-            logging.info("(%s) 🥜 Something went nuts", token)
+        data = None
+
+        while True:
+            data = await proxy_reader.read(7)
+            if data != b"ping": break
+
+            proxy_writer.write(b"pong")
+            await proxy_writer.drain()
+
+            logging.info("(%s) 🏓 ping-pong", token)
+
+        if data != b"connect":
+            logging.info("(%s) 🥜 something went nuts", token)
 
             proxy_writer.close()
 
@@ -164,6 +178,8 @@ async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, 
             )
 
             return
+
+        logging.info("(%s) 💿 start forwarding", token)
 
         _, db = await asyncio.gather(
             queue.put(1),  # Signal to spawn a new agent,
@@ -182,8 +198,10 @@ async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, 
         try:
             await asyncio.gather(
                 forward(token, proxy_peername, proxy_reader, db_writer),  # Proxy → Agent → DB
-                forward(token, db_peername, db_reader, proxy_writer)   # DB → Agent → Proxy
+                forward(token, db_peername, db_reader, proxy_writer)  # DB → Agent → Proxy
             )
+
+            logging.info("(%s) 🏁 finished forwarding", token)
 
         except Exception:
             logging.info(
@@ -200,23 +218,35 @@ async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, 
                 return_exceptions=True
             )
 
-    except (OSError, asyncio.IncompleteReadError) as e:
-        logging.info("(%s) 😭 Connection error, retrying in %.2f sec(s)...", token, retry_delay_seconds)
+    except (OSError, asyncio.IncompleteReadError):
+        logging.info("(%s) 😭 connection error, retrying in %.2f sec(s)...", token, retry_delay_seconds)
         await asyncio.sleep(retry_delay_seconds)
         await queue.put(1)  # Signal to spawn a new agent
 
     except Exception as ex:
-        logging.info("(%s) ❌ Exception: %s", token, ex)
+        logging.info("(%s) ❌ exception: %s", token, ex)
 
     finally:
         logging.info("(%s) 🪦 R.I.P", token)
+
+        tasks = []
+
+        if proxy_writer:
+            proxy_writer.close()
+            tasks.append(proxy_writer.wait_closed())
+
+        if db_writer:
+            db_writer.close()
+            tasks.append(db_writer.wait_closed())
+
+        await asyncio.gather(*tasks, return_exceptions=False)
 
 
 async def spawn_agents(queue: asyncio.Queue, *args):
     while True:
         await queue.get()  # Wait for a signal to spawn an agent
         token = uuid.uuid4()
-        logging.info("(%s) 🤰 Laboring a new agent", token)
+        logging.info("(%s) 🤰 laboring a new agent", token)
         asyncio.create_task(run_agent(token, *args, queue))
 
 
