@@ -6,7 +6,6 @@ import typing
 import uuid
 import ssl
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 T = typing.TypeVar("T")
 
@@ -54,6 +53,16 @@ def validate_retry_delay_seconds(value):
         raise argparse.ArgumentTypeError("Invalid float value.")
 
 
+def validate_log_level(value: str):
+    value = value.upper()
+    log_levels = logging.getLevelNamesMapping()
+
+    if value not in log_levels:
+        raise argparse.ArgumentTypeError(f"options are {", ".join(log_levels)}")
+
+    return value
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Agent to connect to proxy and forward data.")
 
@@ -62,11 +71,13 @@ def parse_args():
 
     default_health_port = parse(to=int, value=os.getenv("HEALTH_PORT"), or_default=4000)
 
-    default_database_host = os.getenv("DATABASE_HOST", "localhost")
-    default_database_port = parse(to=int, value=os.getenv("DATABASE_PORT"), or_default=None)
+    default_service_host = os.getenv("SERVICE_HOST", "localhost")
+    default_service_port = parse(to=int, value=os.getenv("SERVICE_PORT"), or_default=None)
 
     default_min_threads = parse(to=int, value=os.getenv("MIN_THREADS", os.cpu_count()), or_default=1)
     default_retry_delay_seconds = parse(to=float, value=os.getenv("RETRY_DELAY_SECONDS"), or_default=1.0)
+
+    default_log_level = os.getenv("LOG_LEVEL", "INFO")
 
     default_use_ssl = parse_bool(value=os.getenv("USE_SSL"), or_default=False)
     default_ssl_cert = os.getenv("SSL_CERT", None)
@@ -80,17 +91,20 @@ def parse_args():
     parser.add_argument("-e", "--health-port", type=int, default=default_health_port,
                         help=f"Health prob port (default: {default_health_port})")
 
-    parser.add_argument("-d", "--db-host", default=default_database_host,
-                        help=f"Database host (default: {default_database_host})")
+    parser.add_argument("-d", "--service-host", default=default_service_host,
+                        help=f"Service host (default: {default_service_host})")
 
-    parser.add_argument("-b", "--db-port", type=int, default=default_database_port, required=default_database_port is None,
-                        help="Database port (required if not set in environment)")
+    parser.add_argument("-b", "--service-port", type=int, default=default_service_port, required=default_service_port is None,
+                        help="Service port (required if not set in environment)")
 
     parser.add_argument("-n", "--min-threads", type=validate_min_threads, default=default_min_threads,
                         help=f"Minimum number of agent threads to start initially. The system will scale based on load (default: {default_min_threads})")
 
     parser.add_argument("-r", "--retry-delay-seconds", type=validate_retry_delay_seconds, default=default_retry_delay_seconds,
                         help=f"Delay before retrying connection (default: {default_retry_delay_seconds:.2f}s)")
+
+    parser.add_argument("-v", "--log-level", type=validate_log_level, default=default_log_level,
+                        help=f"Log Level (default: {default_log_level})")
 
     parser.add_argument("-s", "--ssl", action="store_true", default=default_use_ssl,
                         help="Enable SSL for connecting to the proxy (default: no)")
@@ -112,19 +126,19 @@ async def forward(agent_token: uuid.UUID, source_peername: tuple[str, int], sour
             destination.write(data)
             await destination.drain()
     except asyncio.IncompleteReadError:
-        logging.info(
+        logging.error(
             "(%s) 😢 { source: %s:%d <-> destination: %s:%d } Unexpected EOF",
             agent_token, *source_peername, *destination.transport.get_extra_info('peername')
         )
 
     except ConnectionResetError:
-        logging.info(
+        logging.error(
             "(%s) 😩 { source: %s:%d <-> destination: %s:%d } Connection reset",
             agent_token, *source_peername, *destination.transport.get_extra_info('peername')
         )
 
     except Exception:
-        logging.info(
+        logging.error(
             "(%s) 👽 { source: %s:%d <-> destination: %s:%d } Something crazy happened",
             agent_token, *source_peername, *destination.transport.get_extra_info('peername')
         )
@@ -142,9 +156,9 @@ async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     await writer.wait_closed()
 
 
-async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, use_ssl, cert, retry_delay_seconds, queue: asyncio.Queue):
+async def run_agent(token: uuid.UUID, proxy_host, proxy_port, svc_host, svc_port, use_ssl, cert, retry_delay_seconds, queue: asyncio.Queue):
     proxy_writer = None
-    db_writer = None
+    svc_writer = None
 
     try:
         ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
@@ -164,10 +178,10 @@ async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, 
             proxy_writer.write(b"pong")
             await proxy_writer.drain()
 
-            logging.info("(%s) 🏓 ping-pong", token)
+            logging.debug("(%s) 🏓 ping-pong", token)
 
         if data != b"connect":
-            logging.info("(%s) 🥜 something went nuts", token)
+            logging.error("(%s) 🥜 something went nuts", token)
 
             proxy_writer.close()
 
@@ -179,52 +193,52 @@ async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, 
 
             return
 
-        logging.info("(%s) 💿 start forwarding", token)
+        logging.debug("(%s) 💿 start forwarding", token)
 
-        _, db = await asyncio.gather(
+        _, svc = await asyncio.gather(
             queue.put(1),  # Signal to spawn a new agent,
-            asyncio.open_connection(db_host, db_port),
+            asyncio.open_connection(svc_host, svc_port),
             return_exceptions=True
         )
 
-        db_reader, db_writer = db
+        svc_reader, svc_writer = svc
 
         proxy_writer.write(b"ready")
         await proxy_writer.drain()
 
-        db_peername = db_writer.transport.get_extra_info('peername')
+        svc_peername = svc_writer.transport.get_extra_info('peername')
         proxy_peername = proxy_writer.transport.get_extra_info('peername')
 
         try:
             await asyncio.gather(
-                forward(token, proxy_peername, proxy_reader, db_writer),  # Proxy → Agent → DB
-                forward(token, db_peername, db_reader, proxy_writer)  # DB → Agent → Proxy
+                forward(token, proxy_peername, proxy_reader, svc_writer),  # Proxy → Agent → Service
+                forward(token, svc_peername, svc_reader, proxy_writer)  # Service → Agent → Proxy
             )
 
-            logging.info("(%s) 🏁 finished forwarding", token)
+            logging.debug("(%s) 🏁 finished forwarding", token)
 
         except Exception:
-            logging.info(
-                "(%s) 🛸 { proxy %s:%d <-> database %s:%d } Something crazy happened.",
-                token, *proxy_peername, *db_peername
+            logging.error(
+                "(%s) 🛸 { proxy %s:%d <-> service %s:%d } Something crazy happened.",
+                token, *proxy_peername, *svc_peername
             )
 
-            db_writer.close()
+            svc_writer.close()
             proxy_writer.close()
 
             await asyncio.gather(
-                db_writer.wait_closed(),
+                svc_writer.wait_closed(),
                 proxy_writer.wait_closed(),
                 return_exceptions=True
             )
 
     except (OSError, asyncio.IncompleteReadError):
-        logging.info("(%s) 😭 connection error, retrying in %.2f sec(s)...", token, retry_delay_seconds)
+        logging.error("(%s) 😭 connection error, retrying in %.2f sec(s)...", token, retry_delay_seconds)
         await asyncio.sleep(retry_delay_seconds)
         await queue.put(1)  # Signal to spawn a new agent
 
     except Exception as ex:
-        logging.info("(%s) ❌ exception: %s", token, ex)
+        logging.error("(%s) ❌ exception: %s", token, ex)
 
     finally:
         logging.info("(%s) 🪦 R.I.P", token)
@@ -235,9 +249,9 @@ async def run_agent(token: uuid.UUID, proxy_host, proxy_port, db_host, db_port, 
             proxy_writer.close()
             tasks.append(proxy_writer.wait_closed())
 
-        if db_writer:
-            db_writer.close()
-            tasks.append(db_writer.wait_closed())
+        if svc_writer:
+            svc_writer.close()
+            tasks.append(svc_writer.wait_closed())
 
         await asyncio.gather(*tasks, return_exceptions=False)
 
@@ -246,12 +260,12 @@ async def spawn_agents(queue: asyncio.Queue, *args):
     while True:
         await queue.get()  # Wait for a signal to spawn an agent
         token = uuid.uuid4()
-        logging.info("(%s) 🤰 laboring a new agent", token)
+        logging.debug("(%s) 🤰 laboring a new agent", token)
         asyncio.create_task(run_agent(token, *args, queue))
 
 
 async def shutdown(loop, health_server):
-    logging.info("️( -_•)︻デ═一💥 killing...")
+    logging.debug("️( -_•)︻デ═一💥 killing...")
 
     await asyncio.sleep(0.5)  # Allow logs to flush
 
@@ -271,6 +285,8 @@ async def shutdown(loop, health_server):
 
 async def main():
     args = parse_args()
+    logging.basicConfig(level=args.log_level, format="%(message)s")
+
     loop = asyncio.get_running_loop()
     queue = asyncio.Queue()
 
@@ -288,8 +304,8 @@ async def main():
                 queue,
                 args.proxy_host,
                 args.proxy_port,
-                args.db_host,
-                args.db_port,
+                args.service_host,
+                args.service_port,
                 args.ssl,
                 args.cert,
                 args.retry_delay_seconds,
@@ -303,7 +319,7 @@ async def main():
         await asyncio.Event().wait()  # Keep the event loop running
 
     except asyncio.CancelledError:
-        logging.info("🛑 Agent was cancelled.")
+        logging.debug("🛑 Agent was cancelled.")
         await shutdown(loop, health_server)
 
 
@@ -311,4 +327,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("⌨️ Interrupted by user.")
+        logging.debug("⌨️ Interrupted by user.")

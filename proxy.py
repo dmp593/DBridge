@@ -7,8 +7,6 @@ import typing
 import ssl
 from asyncio import CancelledError
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-
 
 class Agent:
     token: uuid.UUID
@@ -40,16 +38,16 @@ class Agent:
                 data = await asyncio.wait_for(self.reader.read(4), timeout=5)
                 if data != b"pong": raise Exception()
 
-                logging.info("🏓 ping-pong agent (%s)", self.token)
+                logging.debug("🏓 ping-pong agent (%s)", self.token)
 
                 await asyncio.sleep(self.ping_pong_interval)
 
             except CancelledError:
-                logging.info("🏓 Stopping ping-pong with agent (%s)", self.token)
+                logging.debug("🏓 Stopping ping-pong with agent (%s)", self.token)
                 break
 
             except Exception:
-                logging.info("🏓 Not a ping-pong. Error on agent (%s)", self.token)
+                logging.error("🏓 Not a ping-pong. Error on agent (%s)", self.token)
 
                 self.writer.close()
                 await self.writer.wait_closed()
@@ -196,6 +194,16 @@ def validate_ping_pong_interval(value):
         raise argparse.ArgumentTypeError("Invalid float value.")
 
 
+def validate_log_level(value: str):
+    value = value.upper()
+    log_levels = logging.getLevelNamesMapping()
+
+    if value not in log_levels:
+        raise argparse.ArgumentTypeError(f"options are {", ".join(log_levels)}")
+
+    return value
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Proxy server for forwarding connections.")
 
@@ -214,6 +222,8 @@ def parse_args() -> argparse.Namespace:
     default_zombies_clean_interval=parse(to=float, value=os.getenv("ZOMBIES_CLEAN_INTERVAL"), or_default=0)
 
     default_ping_pong_interval_seconds = parse(to=float, value=os.getenv("PING_PONG_INTERVAL_SECONDS"), or_default=21)
+
+    default_log_level = os.getenv("LOG_LEVEL", "INFO")
 
     default_use_ssl = parse_bool(value=os.getenv("USE_SSL"), or_default=False)
     default_ssl_cert = os.getenv("SSL_CERT", None)
@@ -252,6 +262,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-u", "--ping-pong-interval", type=validate_ping_pong_interval, default=default_ping_pong_interval_seconds,
                         help=f"Interval (secs) to do a ping-pong to keep connection alive between the proxy and the agents. (Default: {default_ping_pong_interval_seconds:.2f})")
 
+    parser.add_argument("-v", "--log-level", type=validate_log_level, default=default_log_level,
+                        help=f"Log Level (default: {default_log_level})")
+
     parser.add_argument("-s", "--ssl", action="store_true", default=default_use_ssl,
                         help="Enable SSL for secure connections (default: no)")
 
@@ -274,19 +287,19 @@ async def forward(agent_token: uuid.UUID, source_peername: tuple[str, int], sour
             destination.write(data)
             await destination.drain()
     except asyncio.IncompleteReadError:
-        logging.info(
+        logging.error(
             "😢 { (%s) source: %s:%d <-> destination: %s:%d } Unexpected EOF",
             agent_token, *source_peername, *destination.transport.get_extra_info('peername')
         )
 
     except ConnectionResetError:
-        logging.info(
+        logging.error(
             "😩 { (%s) source: %s:%d <-> destination: %s:%d } Connection reset",
             agent_token, *source_peername, *destination.transport.get_extra_info('peername')
         )
 
     except Exception:
-        logging.info(
+        logging.error(
             "👽 { (%s) source: %s:%d <-> destination: %s:%d } Something crazy happened",
             agent_token, *source_peername, *destination.transport.get_extra_info('peername')
         )
@@ -321,7 +334,7 @@ async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     agent_peername = writer.transport.get_extra_info('peername')
 
     if '*' not in allowed_hosts and agent_peername[0] not in allowed_hosts:
-        logging.info(
+        logging.warning(
             "🚨 ACCESS DENIED 🚨 | Unauthorized agent attempted to connect! "
             "IP: %s | Possible Intrusion Attempt! 🏴‍☠️",
             agent_peername[0]
@@ -339,7 +352,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     client_peername = writer.transport.get_extra_info('peername')
 
     if '*' not in allowed_hosts and client_peername[0] not in allowed_hosts:
-        logging.info(
+        logging.warning(
             "🚨 ACCESS DENIED 🚨 | Unauthorized client attempted to connect! "
             "IP: %s | Possible Intrusion Attempt! 🏴‍☠️",
             client_peername[0]
@@ -404,7 +417,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             *agent_peername, agent.token, *client_peername
         )
     except Exception:
-        logging.info(
+        logging.error(
             "🛸 { agent %s:%d (%s) <-> client %s:%d } Something crazy happened",
             *agent_peername, agent.token, *client_peername
         )
@@ -420,7 +433,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def shutdown(loop, servers: tuple):
-    logging.info("️( -_•)︻デ═一💥 killing...")
+    logging.debug("️( -_•)︻デ═一💥 killing...")
 
     await asyncio.sleep(0.5)  # Allow logs to flush
 
@@ -449,6 +462,8 @@ async def shutdown(loop, servers: tuple):
 async def main():
     args = parse_args()
     loop = asyncio.get_running_loop()
+
+    logging.basicConfig(level=args.log_level, format="%(message)s")
 
     ssl_context = None
     if args.ssl:
@@ -487,7 +502,7 @@ async def main():
         await asyncio.Event().wait()
 
     except asyncio.CancelledError:
-        logging.info("🛑 Proxy was cancelled.")
+        logging.debug("🛑 Proxy was cancelled.")
         await shutdown(loop, servers)
 
 
@@ -495,4 +510,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("⌨️ Interrupted by user.")
+        logging.debug("⌨️ Interrupted by user.")
