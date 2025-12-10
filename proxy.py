@@ -5,7 +5,24 @@ import logging
 import uuid
 import typing
 import ssl
-from asyncio import CancelledError
+import time
+
+
+def format_peer(peer: tuple[str, int] | None) -> str:
+    if isinstance(peer, tuple) and len(peer) >= 2:
+        return f"{peer[0]}:{peer[1]}"
+    return "unknown"
+
+
+def writer_peer(writer: asyncio.StreamWriter | None) -> tuple[str, int] | None:
+    if writer is None:
+        return None
+
+    transport = writer.transport
+    if not transport:
+        return None
+
+    return transport.get_extra_info('peername')
 
 
 class Agent:
@@ -17,7 +34,13 @@ class Agent:
     ping_pong_interval: float
     task_ping_pong: asyncio.Task | None = None
 
-    def __init__(self, token: uuid.UUID, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, ping_pong_interval: float):
+    def __init__(
+        self,
+        token: uuid.UUID,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        ping_pong_interval: float,
+    ):
         self.token = token
         self.reader = reader
         self.writer = writer
@@ -36,18 +59,17 @@ class Agent:
                 await self.writer.drain()
 
                 data = await asyncio.wait_for(self.reader.read(4), timeout=5)
-                if data != b"pong": raise Exception()
-
-                logging.debug("🏓 ping-pong agent (%s)", self.token)
+                if data != b"pong":
+                    raise RuntimeError("agent pong mismatch")
 
                 await asyncio.sleep(self.ping_pong_interval)
 
-            except CancelledError:
-                logging.debug("🏓 Stopping ping-pong with agent (%s)", self.token)
+            except asyncio.CancelledError:
+                logging.debug("agent=%s ping_loop_stopped", self.token)
                 break
 
             except Exception:
-                logging.error("🏓 Not a ping-pong. Error on agent (%s)", self.token)
+                logging.warning("agent=%s ping_loop_failed closing_connection", self.token)
 
                 self.writer.close()
                 await self.writer.wait_closed()
@@ -74,13 +96,15 @@ class Context:
 
     async def add_agent(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, ping_pong_interval: float):
         token = uuid.UUID(bytes=await reader.read(16))
-        logging.info(f"🎉 new agent (%s) %s:%d", token, *writer.transport.get_extra_info('peername'))
+        agent_peer = writer_peer(writer)
+        logging.info("agent=%s state=registered peer=%s", token, format_peer(agent_peer))
 
         agent = Agent(token, reader, writer, ping_pong_interval)
         await agent.start_ping_pong()
 
         async with self.lock:
             self.agents.append(agent)
+            logging.debug("agent=%s pool_size=%d", token, len(self.agents))
 
     async def clean_zombies(self, sleep_interval: float):
         while True:
@@ -93,7 +117,7 @@ class Context:
 
             for agent in agents:
                 if agent.reader.at_eof():
-                    logging.info("🧟 zombie agent (%s) detected.", agent.token)
+                    logging.info("agent=%s state=zombie_detected", agent.token)
 
                     try:
                         async with self.lock:
@@ -103,28 +127,29 @@ class Context:
                         closing_zombies.append(agent.writer.wait_closed())
 
                     except ValueError:  # agent already popped by another thread...
-                        logging.info("🧼 zombie agent (%s) already gone.", agent.token)
+                        logging.debug("agent=%s zombie_already_removed", agent.token)
 
             await asyncio.gather(*closing_zombies, return_exceptions=True)
 
             if len(closing_zombies) > 0:
-                logging.info("🗑️ cleaned %d zombie agent(s)", len(closing_zombies))
+                logging.info("cleaned_zombie_agents=%d", len(closing_zombies))
 
     async def pop_agent(self) -> Agent | None:
         while True:
             try:
                 async with self.lock:
                     agent = self.agents.pop(0)
+                    pool_size = len(self.agents)
 
                 await agent.stop_ping_pong()
 
                 if agent.reader.at_eof():
-                    logging.info("🗑️ zombie agent (%s) discarded", agent.token)
+                    logging.info("agent=%s state=zombie_discarded", agent.token)
                     agent.writer.close()
                     await agent.writer.wait_closed()
                     continue
 
-                logging.info("🍾 agent (%s) popped", agent.token)
+                logging.info("agent=%s state=assigned remaining_pool=%d", agent.token, pool_size)
                 return agent
 
             except IndexError:  # no agents left.
@@ -160,6 +185,8 @@ def parse_bool(value: typing.Any, or_default: typing.Any | None = None) -> typin
             case _:
                 return or_default
 
+    return or_default
+
 
 def validate_idle_timeout(value):
     try:
@@ -167,8 +194,8 @@ def validate_idle_timeout(value):
         if f_value < 0:
             raise argparse.ArgumentTypeError("must be >= 0")
         return f_value
-    except ValueError:
-        raise argparse.ArgumentTypeError("Invalid float value.")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Invalid float value.") from exc
 
 
 def validate_wait_agent_retry_interval(value):
@@ -177,8 +204,8 @@ def validate_wait_agent_retry_interval(value):
         if f_value <= 0 or f_value > 300:
             raise argparse.ArgumentTypeError("must be > 0 and <= 300")
         return f_value
-    except ValueError:
-        raise argparse.ArgumentTypeError("Invalid float value.")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Invalid float value.") from exc
 
 
 def validate_zombies_clean_interval(value):
@@ -190,8 +217,8 @@ def validate_zombies_clean_interval(value):
         if f_value < 0 or f_value > 300:
             raise argparse.ArgumentTypeError("must be >= 0 and <= 300")
         return f_value
-    except ValueError:
-        raise argparse.ArgumentTypeError("Invalid float value.")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Invalid float value.") from exc
 
 
 def validate_ping_pong_interval(value):
@@ -200,8 +227,8 @@ def validate_ping_pong_interval(value):
         if f_value <= 0 or f_value >= 30:
             raise argparse.ArgumentTypeError("must be > 0 and < 30")
         return f_value
-    except ValueError:
-        raise argparse.ArgumentTypeError("Invalid float value.")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Invalid float value.") from exc
 
 
 def validate_log_level(value: str):
@@ -209,7 +236,9 @@ def validate_log_level(value: str):
     log_levels = logging.getLevelNamesMapping()
 
     if value not in log_levels:
-        raise argparse.ArgumentTypeError(f"options are {", ".join(log_levels)}")
+        raise argparse.ArgumentTypeError(
+            f"options are {', '.join(log_levels)}"
+        )
 
     return value
 
@@ -218,21 +247,57 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Proxy server for forwarding connections.")
 
     default_host = os.getenv("HOST", "0.0.0.0")
-    default_port_liveness = parse(to=int, value=os.getenv("PORT_LIVENESS"), or_default=3130)
-    default_port_readiness = parse(to=int, value=os.getenv("PORT_READINESS"), or_default=4260)
-    default_port_agents = parse(to=int, value=os.getenv("PORT_AGENTS"), or_default=7000)
-    default_port_clients = parse(to=int, value=os.getenv("PORT_CLIENTS"), or_default=9000)
+    default_port_liveness = parse(
+        to=int,
+        value=os.getenv("PORT_LIVENESS"),
+        or_default=3130,
+    )
+    default_port_readiness = parse(
+        to=int,
+        value=os.getenv("PORT_READINESS"),
+        or_default=4260,
+    )
+    default_port_agents = parse(
+        to=int,
+        value=os.getenv("PORT_AGENTS"),
+        or_default=7000,
+    )
+    default_port_clients = parse(
+        to=int,
+        value=os.getenv("PORT_CLIENTS"),
+        or_default=9000,
+    )
 
     default_allowed_agents = os.getenv("ALLOWED_AGENTS", "*")
     default_allowed_clients = os.getenv("ALLOWED_CLIENTS", "*")
 
-    default_wait_agent_max_tries = parse(to=int, value=os.getenv("WAIT_AGENT_MAX_TRIES"), or_default=10)
-    default_wait_agent_retry_interval = parse(to=float, value=os.getenv("WAIT_AGENT_RETRY_INTERVAL"), or_default=0.7)
+    default_wait_agent_max_tries = parse(
+        to=int,
+        value=os.getenv("WAIT_AGENT_MAX_TRIES"),
+        or_default=10,
+    )
+    default_wait_agent_retry_interval = parse(
+        to=float,
+        value=os.getenv("WAIT_AGENT_RETRY_INTERVAL"),
+        or_default=0.7,
+    )
 
-    default_zombies_clean_interval=parse(to=float, value=os.getenv("ZOMBIES_CLEAN_INTERVAL"), or_default=0)
+    default_zombies_clean_interval = parse(
+        to=float,
+        value=os.getenv("ZOMBIES_CLEAN_INTERVAL"),
+        or_default=0,
+    )
 
-    default_ping_pong_interval_seconds = parse(to=float, value=os.getenv("PING_PONG_INTERVAL_SECONDS"), or_default=21)
-    default_forward_idle_timeout_seconds = parse(to=float, value=os.getenv("FORWARD_IDLE_TIMEOUT_SECONDS"), or_default=300.0)
+    default_ping_pong_interval_seconds = parse(
+        to=float,
+        value=os.getenv("PING_PONG_INTERVAL_SECONDS"),
+        or_default=21,
+    )
+    default_forward_idle_timeout_seconds = parse(
+        to=float,
+        value=os.getenv("FORWARD_IDLE_TIMEOUT_SECONDS"),
+        or_default=300.0,
+    )
 
     default_log_level = os.getenv("LOG_LEVEL", "INFO")
 
@@ -240,58 +305,141 @@ def parse_args() -> argparse.Namespace:
     default_ssl_cert = os.getenv("SSL_CERT", None)
     default_ssl_key = os.getenv("SSL_KEY", None)
 
-    parser.add_argument("-x", "--host", default=default_host,
-                        help=f"Host to listen on (default: {default_host})")
+    parser.add_argument(
+        "-x", "--host",
+        default=default_host,
+        help=f"Host to listen on (default: {default_host})",
+    )
 
-    parser.add_argument("-l", "--port-liveness", type=int, default=default_port_liveness,
-                        help=f"Port for liveness prob (default: {default_port_liveness})")
+    parser.add_argument(
+        "-l", "--port-liveness",
+        type=int,
+        default=default_port_liveness,
+        help=f"Port for liveness prob (default: {default_port_liveness})",
+    )
 
-    parser.add_argument("-r", "--port-readiness", type=int, default=default_port_readiness,
-                        help=f"Port for readiness prob (default: {default_port_readiness})")
+    parser.add_argument(
+        "-r", "--port-readiness",
+        type=int,
+        default=default_port_readiness,
+        help=f"Port for readiness prob (default: {default_port_readiness})",
+    )
 
-    parser.add_argument("-a", "--port-agents", type=int, default=default_port_agents,
-                        help=f"Port for agent connections (default: {default_port_agents})")
+    parser.add_argument(
+        "-a", "--port-agents",
+        type=int,
+        default=default_port_agents,
+        help=f"Port for agent connections (default: {default_port_agents})",
+    )
 
-    parser.add_argument("-p", "--port-clients", type=int, default=default_port_clients,
-                        help=f"Port for client connections (default: {default_port_clients})")
+    parser.add_argument(
+        "-p", "--port-clients",
+        type=int,
+        default=default_port_clients,
+        help=f"Port for client connections (default: {default_port_clients})",
+    )
 
-    parser.add_argument("-q", "--allow-agent", type=str, nargs='+', default=default_allowed_agents,
-                        help=f"Agent hostname or IP addresses allowed to access (default: {default_allowed_agents})")
+    parser.add_argument(
+        "-q", "--allow-agent",
+        type=str,
+        nargs='+',
+        default=default_allowed_agents,
+        help=(
+            "Agent hostname or IP addresses allowed to access "
+            f"(default: {default_allowed_agents})"
+        ),
+    )
 
-    parser.add_argument("-i", "--allow-client", type=str, nargs='+', default=default_allowed_clients,
-                        help=f"Client hostname or IP addresses allowed to access (default: {default_allowed_clients})")
+    parser.add_argument(
+        "-i", "--allow-client",
+        type=str,
+        nargs='+',
+        default=default_allowed_clients,
+        help=(
+            "Client hostname or IP addresses allowed to access "
+            f"(default: {default_allowed_clients})"
+        ),
+    )
 
-    parser.add_argument("-t", "--wait-agent-max-tries", type=int, default=default_wait_agent_max_tries,
-                        help=f"Maximum number of attempts to find an agent (default: {default_wait_agent_max_tries})")
+    parser.add_argument(
+        "-t", "--wait-agent-max-tries",
+        type=int,
+        default=default_wait_agent_max_tries,
+        help=(
+            "Maximum number of attempts to find an agent "
+            f"(default: {default_wait_agent_max_tries})"
+        ),
+    )
 
-    parser.add_argument("-j", "--wait-agent-retry-interval", type=validate_wait_agent_retry_interval, default=default_wait_agent_retry_interval,
-                        help=f"Time (secs) to sleep between retries when no agent is available (default: {default_wait_agent_retry_interval:.2f})")
+    parser.add_argument(
+        "-j", "--wait-agent-retry-interval",
+        type=validate_wait_agent_retry_interval,
+        default=default_wait_agent_retry_interval,
+        help=(
+            "Time (secs) to sleep between retries when no agent is available "
+            f"(default: {default_wait_agent_retry_interval:.2f})"
+        ),
+    )
 
-    parser.add_argument("-z", "--zombies-clean-interval", type=validate_zombies_clean_interval, default=default_zombies_clean_interval,
-                        help=f"Interval (secs) for cleaning zombie agents. Set to 0 to disable automatic cleanup: zombies will only be discarded when getting an available agent. (Default: {default_zombies_clean_interval:.2f})")
+    parser.add_argument(
+        "-z", "--zombies-clean-interval",
+        type=validate_zombies_clean_interval,
+        default=default_zombies_clean_interval,
+        help=(
+            "Interval (secs) for cleaning zombie agents. Set to 0 to disable automatic cleanup: "
+            "zombies will only be discarded when getting an available agent. "
+            f"(Default: {default_zombies_clean_interval:.2f})"
+        ),
+    )
 
-    parser.add_argument("-u", "--ping-pong-interval", type=validate_ping_pong_interval, default=default_ping_pong_interval_seconds,
-                        help=f"Interval (secs) to do a ping-pong to keep connection alive between the proxy and the agents. (Default: {default_ping_pong_interval_seconds:.2f})")
+    parser.add_argument(
+        "-u", "--ping-pong-interval",
+        type=validate_ping_pong_interval,
+        default=default_ping_pong_interval_seconds,
+        help=(
+            "Interval (secs) to do a ping-pong to keep connection alive between the proxy and the agents. "
+            f"(Default: {default_ping_pong_interval_seconds:.2f})"
+        ),
+    )
 
-    parser.add_argument("-f", "--forward-idle-timeout", type=validate_idle_timeout, default=default_forward_idle_timeout_seconds,
-                        help=(
-                            "Maximum seconds of inactivity allowed on a client<->service data stream before the proxy "
-                            "forces the connection closed. Set to 0 to disable (default: %.0fs)."
-                        ) % default_forward_idle_timeout_seconds)
+    parser.add_argument(
+        "-f", "--forward-idle-timeout",
+        type=validate_idle_timeout,
+        default=default_forward_idle_timeout_seconds,
+        help=(
+            "Maximum seconds of inactivity allowed on a client<->service data stream before the proxy "
+            "forces the connection closed. Set to 0 to disable (default: %.0fs)."
+        ) % default_forward_idle_timeout_seconds,
+    )
 
-    parser.add_argument("-v", "--log-level", type=validate_log_level, default=default_log_level,
-                        help=f"Log Level (default: {default_log_level})")
+    parser.add_argument(
+        "-v", "--log-level",
+        type=validate_log_level,
+        default=default_log_level,
+        help=f"Log Level (default: {default_log_level})",
+    )
 
-    parser.add_argument("-s", "--ssl", action="store_true", default=default_use_ssl,
-                        help="Enable SSL for secure connections (default: no)")
+    parser.add_argument(
+        "-s", "--ssl",
+        action="store_true",
+        default=default_use_ssl,
+        help="Enable SSL for secure connections (default: no)",
+    )
 
-    parser.add_argument("-c", "--cert", default=default_ssl_cert,
-                        help=f"SSL certificate file (optional)")
+    parser.add_argument(
+        "-c", "--cert",
+        default=default_ssl_cert,
+        help="SSL certificate file (optional)",
+    )
 
-    parser.add_argument("-k", "--key", default=default_ssl_key,
-                        help=f"SSL private key file (optional)")
+    parser.add_argument(
+        "-k", "--key",
+        default=default_ssl_key,
+        help="SSL private key file (optional)",
+    )
 
     return parser.parse_args()
+
 
 async def forward(
     agent_token: uuid.UUID,
@@ -302,6 +450,9 @@ async def forward(
     idle_timeout: float,
 ):
     timeout_enabled = idle_timeout > 0
+
+    total_bytes = 0
+    dest_peer = format_peer(writer_peer(destination))
 
     try:
         while True:
@@ -315,38 +466,51 @@ async def forward(
 
             destination.write(data)
             await destination.drain()
+            total_bytes += len(data)
     except asyncio.TimeoutError:
         logging.warning(
-            "⏰ { (%s) %s source: %s:%d <-> destination: %s:%d } idle timeout",
+            "agent=%s direction=%s source=%s destination=%s idle_timeout_seconds=%.0f",
             agent_token,
             direction,
-            *source_peername,
-            *destination.transport.get_extra_info('peername'),
+            format_peer(source_peername),
+            dest_peer,
+            idle_timeout,
         )
     except asyncio.IncompleteReadError:
         logging.error(
-            "😢 { (%s) source: %s:%d <-> destination: %s:%d } Unexpected EOF",
-            agent_token, *source_peername, *destination.transport.get_extra_info('peername')
+            "agent=%s direction=%s source=%s destination=%s unexpected_eof",
+            agent_token,
+            direction,
+            format_peer(source_peername),
+            dest_peer,
         )
 
     except ConnectionResetError:
         logging.error(
-            "😩 { (%s) source: %s:%d <-> destination: %s:%d } Connection reset",
-            agent_token, *source_peername, *destination.transport.get_extra_info('peername')
+            "agent=%s direction=%s source=%s destination=%s connection_reset",
+            agent_token,
+            direction,
+            format_peer(source_peername),
+            dest_peer,
         )
 
     except Exception:
-        logging.error(
-            "👽 { (%s) source: %s:%d <-> destination: %s:%d } Something crazy happened",
-            agent_token, *source_peername, *destination.transport.get_extra_info('peername')
+        logging.exception(
+            "agent=%s direction=%s source=%s destination=%s unexpected_exception",
+            agent_token,
+            direction,
+            format_peer(source_peername),
+            dest_peer,
         )
 
     finally:
         destination.close()
         await destination.wait_closed()
 
+    return total_bytes
 
-async def handle_liveness(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+
+async def handle_liveness(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     writer.write("🚀 alive and forwarding packets like a champ!".encode())
     await writer.drain()
 
@@ -354,7 +518,7 @@ async def handle_liveness(reader: asyncio.StreamReader, writer: asyncio.StreamWr
     await writer.wait_closed()
 
 
-async def handle_readiness(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+async def handle_readiness(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     if await context.length() == 0:
         message = "⚠️ not ready! waiting for agents to join..."
     else:
@@ -367,14 +531,18 @@ async def handle_readiness(reader: asyncio.StreamReader, writer: asyncio.StreamW
     await writer.wait_closed()
 
 
-async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allowed_hosts: list[str], ping_pong_interval: float):
+async def handle_agent(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    allowed_hosts: list[str],
+    ping_pong_interval: float,
+):
     agent_peername = writer.transport.get_extra_info('peername')
 
     if '*' not in allowed_hosts and agent_peername[0] not in allowed_hosts:
         logging.warning(
-            "🚨 ACCESS DENIED 🚨 | Unauthorized agent attempted to connect! "
-            "IP: %s | Possible Intrusion Attempt! 🏴‍☠️",
-            agent_peername[0]
+            "agent_peer=%s access_denied=agent_not_allowed",
+            format_peer(agent_peername),
         )
 
         writer.close()
@@ -397,9 +565,8 @@ async def handle_client(
 
     if '*' not in allowed_hosts and client_peername[0] not in allowed_hosts:
         logging.warning(
-            "🚨 ACCESS DENIED 🚨 | Unauthorized client attempted to connect! "
-            "IP: %s | Possible Intrusion Attempt! 🏴‍☠️",
-            client_peername[0]
+            "client_peer=%s access_denied=client_not_allowed",
+            format_peer(client_peername),
         )
 
         writer.close()
@@ -407,22 +574,34 @@ async def handle_client(
 
         return
 
-    logging.info("🎉 new client %s:%d", *client_peername)
+    logging.info("client=%s state=connected", format_peer(client_peername))
 
     agent = None
 
-    for i in range(wait_agent_max_tries):
+    for attempt in range(wait_agent_max_tries):
         agent = await context.pop_agent()
-        if agent: break
+        if agent:
+            break
 
-        logging.info("🍃 no agents available, retrying in %.2f sec(s)...", wait_agent_retry_interval)
+        logging.debug(
+            "client=%s waiting_for_agent attempt=%d/%d retry_interval=%.2fs",
+            format_peer(client_peername),
+            attempt + 1,
+            wait_agent_max_tries,
+            wait_agent_retry_interval,
+        )
         await asyncio.sleep(wait_agent_retry_interval)
     else:
-        logging.info("👻 no agents available.")
+        logging.warning(
+            "client=%s no_agent_available max_attempts=%d",
+            format_peer(client_peername),
+            wait_agent_max_tries,
+        )
 
     if not agent:
         writer.close()
-        return await writer.wait_closed()
+        await writer.wait_closed()
+        return
 
     agent.writer.write(b"connect")
     await agent.writer.drain()
@@ -430,6 +609,11 @@ async def handle_client(
     agent_peername = agent.writer.transport.get_extra_info('peername')
 
     if await agent.reader.read(5) != b"ready":
+        logging.error(
+            "bridge_aborted agent_token=%s client_peer=%s reason=agent_not_ready",
+            agent.token,
+            format_peer(client_peername),
+        )
         writer.close()
         agent.writer.close()
 
@@ -443,27 +627,51 @@ async def handle_client(
 
     try:
         logging.info(
-            "💿 { agent %s:%d (%s) <-> client %s:%d } started",
-            *agent_peername, agent.token, *client_peername
+            "bridge_started agent_token=%s agent_peer=%s client_peer=%s",
+            agent.token,
+            format_peer(agent_peername),
+            format_peer(client_peername),
         )
 
-        await asyncio.gather(
-            asyncio.create_task(
-                forward(agent.token, "client->agent", client_peername, reader, agent.writer, forward_idle_timeout)
+        bridge_started_at = time.monotonic()
+        client_to_agent_bytes, agent_to_client_bytes = await asyncio.gather(
+            forward(
+                agent.token,
+                "client->agent",
+                client_peername,
+                reader,
+                agent.writer,
+                forward_idle_timeout,
             ),
-            asyncio.create_task(
-                forward(agent.token, "agent->client", agent_peername, agent.reader, writer, forward_idle_timeout)
-            )
+            forward(
+                agent.token,
+                "agent->client",
+                agent_peername,
+                agent.reader,
+                writer,
+                forward_idle_timeout,
+            ),
         )
 
+        duration = time.monotonic() - bridge_started_at
         logging.info(
-            "🏁 { agent %s:%d (%s) <-> client %s:%d } finished",
-            *agent_peername, agent.token, *client_peername
+            (
+                "bridge_finished agent_token=%s agent_peer=%s client_peer=%s duration=%.2fs "
+                "bytes_client_to_agent=%d bytes_agent_to_client=%d"
+            ),
+            agent.token,
+            format_peer(agent_peername),
+            format_peer(client_peername),
+            duration,
+            client_to_agent_bytes,
+            agent_to_client_bytes,
         )
     except Exception:
-        logging.error(
-            "🛸 { agent %s:%d (%s) <-> client %s:%d } Something crazy happened",
-            *agent_peername, agent.token, *client_peername
+        logging.exception(
+            "bridge_failed agent_token=%s agent_peer=%s client_peer=%s",
+            agent.token,
+            format_peer(agent_peername),
+            format_peer(client_peername),
         )
 
         agent.writer.close()
@@ -477,7 +685,7 @@ async def handle_client(
 
 
 async def shutdown(loop, servers: tuple):
-    logging.debug("️( -_•)︻デ═一💥 killing...")
+    logging.debug("proxy_shutdown_requested")
 
     await asyncio.sleep(0.5)  # Allow logs to flush
 
@@ -549,11 +757,16 @@ async def main():
         asyncio.create_task(context.clean_zombies(args.zombies_clean_interval))
 
     try:
-        logging.info("三三ᕕ( ᐛ )ᕗ")
+        logging.info(
+            "proxy_started host=%s agents_port=%d clients_port=%d",
+            args.host,
+            args.port_agents,
+            args.port_clients,
+        )
         await asyncio.Event().wait()
 
     except asyncio.CancelledError:
-        logging.debug("🛑 Proxy was cancelled.")
+        logging.debug("proxy_cancelled")
         await shutdown(loop, servers)
 
 
@@ -561,4 +774,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.debug("⌨️ Interrupted by user.")
+        logging.debug("proxy_interrupted_by_user")

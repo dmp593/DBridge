@@ -5,9 +5,27 @@ import logging
 import typing
 import uuid
 import ssl
+import time
 
 
 T = typing.TypeVar("T")
+
+
+def format_peer(peer: tuple[str, int] | None) -> str:
+    if isinstance(peer, tuple) and len(peer) >= 2:
+        return f"{peer[0]}:{peer[1]}"
+    return "unknown"
+
+
+def writer_peer(writer: asyncio.StreamWriter | None) -> tuple[str, int] | None:
+    if writer is None:
+        return None
+
+    transport = writer.transport
+    if not transport:
+        return None
+
+    return transport.get_extra_info('peername')
 
 
 def parse(to: typing.Type[T], value: typing.Any, or_default: T | None = None) -> T | None:
@@ -32,6 +50,8 @@ def parse_bool(value: typing.Any, or_default: typing.Any | None = None) -> typin
             case _:
                 return or_default
 
+    return or_default
+
 
 def validate_min_threads(value):
     try:
@@ -39,8 +59,8 @@ def validate_min_threads(value):
         if f_value <= 0:
             raise argparse.ArgumentTypeError("must be a positive integer")
         return f_value
-    except ValueError:
-        raise argparse.ArgumentTypeError("Invalid integer value.")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Invalid integer value.") from exc
 
 
 def validate_retry_delay_seconds(value):
@@ -49,8 +69,8 @@ def validate_retry_delay_seconds(value):
         if f_value <= 0 or f_value > 300:
             raise argparse.ArgumentTypeError("must be > 0 and <= 300")
         return f_value
-    except ValueError:
-        raise argparse.ArgumentTypeError("Invalid float value.")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Invalid float value.") from exc
 
 
 def validate_idle_timeout(value):
@@ -59,8 +79,8 @@ def validate_idle_timeout(value):
         if f_value < 0:
             raise argparse.ArgumentTypeError("must be >= 0")
         return f_value
-    except ValueError:
-        raise argparse.ArgumentTypeError("Invalid float value.")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Invalid float value.") from exc
 
 
 def validate_log_level(value: str):
@@ -93,41 +113,92 @@ def parse_args():
     default_use_ssl = parse_bool(value=os.getenv("USE_SSL"), or_default=False)
     default_ssl_cert = os.getenv("SSL_CERT", None)
 
-    parser.add_argument("-x", "--proxy-host", default=default_proxy_host, required=default_proxy_host is None,
-                        help="Proxy server host (required if not set in environment)")
+    parser.add_argument(
+        "-x", "--proxy-host",
+        default=default_proxy_host,
+        required=default_proxy_host is None,
+        help="Proxy server host (required if not set in environment)",
+    )
 
-    parser.add_argument("-p", "--proxy-port", type=int, default=default_proxy_port,
-                        help=f"Proxy server port (default: {default_proxy_port})")
+    parser.add_argument(
+        "-p", "--proxy-port",
+        type=int,
+        default=default_proxy_port,
+        help=f"Proxy server port (default: {default_proxy_port})",
+    )
 
-    parser.add_argument("-e", "--health-port", type=int, default=default_health_port,
-                        help=f"Health prob port (default: {default_health_port})")
+    parser.add_argument(
+        "-e", "--health-port",
+        type=int,
+        default=default_health_port,
+        help=f"Health prob port (default: {default_health_port})",
+    )
 
-    parser.add_argument("-d", "--service-host", default=default_service_host,
-                        help=f"Service host (default: {default_service_host})")
+    parser.add_argument(
+        "-d", "--service-host",
+        default=default_service_host,
+        help=f"Service host (default: {default_service_host})",
+    )
 
-    parser.add_argument("-b", "--service-port", type=int, default=default_service_port, required=default_service_port is None,
-                        help="Service port (required if not set in environment)")
+    parser.add_argument(
+        "-b", "--service-port",
+        type=int,
+        default=default_service_port,
+        required=default_service_port is None,
+        help="Service port (required if not set in environment)",
+    )
 
-    parser.add_argument("-n", "--min-threads", type=validate_min_threads, default=default_min_threads,
-                        help=f"Minimum number of agent threads to start initially. The system will scale based on load (default: {default_min_threads})")
+    parser.add_argument(
+        "-n", "--min-threads",
+        type=validate_min_threads,
+        default=default_min_threads,
+        help=(
+            "Minimum number of agent threads to start initially. "
+            "The system will scale based on load "
+            f"(default: {default_min_threads})"
+        ),
+    )
 
-    parser.add_argument("-r", "--retry-delay-seconds", type=validate_retry_delay_seconds, default=default_retry_delay_seconds,
-                        help=f"Delay before retrying connection (default: {default_retry_delay_seconds:.2f}s)")
+    parser.add_argument(
+        "-r", "--retry-delay-seconds",
+        type=validate_retry_delay_seconds,
+        default=default_retry_delay_seconds,
+        help=(
+            "Delay before retrying connection "
+            f"(default: {default_retry_delay_seconds:.2f}s)"
+        ),
+    )
 
-    parser.add_argument("-f", "--forward-idle-timeout", type=validate_idle_timeout, default=default_forward_idle_timeout,
-                        help=(
-                            "Maximum seconds of inactivity allowed on a data stream before the agent closes the "
-                            "connection. Set to 0 to disable idle timeout (default: %.0fs)."
-                        ) % default_forward_idle_timeout)
+    parser.add_argument(
+        "-f", "--forward-idle-timeout",
+        type=validate_idle_timeout,
+        default=default_forward_idle_timeout,
+        help=(
+            "Maximum seconds of inactivity allowed on a data stream before the agent closes the "
+            "connection. Set to 0 to disable idle timeout (default: %.0fs)."
+        ) % default_forward_idle_timeout,
+    )
 
-    parser.add_argument("-v", "--log-level", type=validate_log_level, default=default_log_level,
-                        help=f"Log Level (default: {default_log_level})")
+    parser.add_argument(
+        "-v", "--log-level",
+        type=validate_log_level,
+        default=default_log_level,
+        help=f"Log Level (default: {default_log_level})",
+    )
 
-    parser.add_argument("-s", "--ssl", action="store_true", default=default_use_ssl,
-                        help="Enable SSL for connecting to the proxy (default: no)")
+    parser.add_argument(
+        "-s", "--ssl",
+        action="store_true",
+        default=default_use_ssl,
+        help="Enable SSL for connecting to the proxy (default: no)",
+    )
 
-    parser.add_argument("-c", "--cert", type=str, default=default_ssl_cert,
-                        help=f"Path to the CA certificate file (optional)")
+    parser.add_argument(
+        "-c", "--cert",
+        type=str,
+        default=default_ssl_cert,
+        help="Path to the CA certificate file (optional)",
+    )
 
     return parser.parse_args()
 
@@ -142,6 +213,9 @@ async def forward(
 ):
     timeout_enabled = idle_timeout > 0
 
+    total_bytes = 0
+    dest_peer = format_peer(writer_peer(destination))
+
     try:
         while True:
             if timeout_enabled:
@@ -154,44 +228,51 @@ async def forward(
 
             destination.write(data)
             await destination.drain()
+            total_bytes += len(data)
     except asyncio.TimeoutError:
         logging.warning(
-            "(%s) ⏰ idle timeout forwarding %s { source: %s:%d <-> destination: %s:%d }",
+            "agent=%s direction=%s source=%s destination=%s idle_timeout_seconds=%.0f",
             agent_token,
             direction,
-            *source_peername,
-            *destination.transport.get_extra_info('peername'),
+            format_peer(source_peername),
+            dest_peer,
+            idle_timeout,
         )
     except asyncio.IncompleteReadError:
         logging.error(
-            "(%s) 😢 { source: %s:%d <-> destination: %s:%d } Unexpected EOF",
+            "agent=%s direction=%s source=%s destination=%s unexpected_eof",
             agent_token,
-            *source_peername,
-            *destination.transport.get_extra_info('peername'),
+            direction,
+            format_peer(source_peername),
+            dest_peer,
         )
 
     except ConnectionResetError:
         logging.error(
-            "(%s) 😩 { source: %s:%d <-> destination: %s:%d } Connection reset",
+            "agent=%s direction=%s source=%s destination=%s connection_reset",
             agent_token,
-            *source_peername,
-            *destination.transport.get_extra_info('peername'),
+            direction,
+            format_peer(source_peername),
+            dest_peer,
         )
 
     except Exception:
-        logging.error(
-            "(%s) 👽 { source: %s:%d <-> destination: %s:%d } Something crazy happened",
+        logging.exception(
+            "agent=%s direction=%s source=%s destination=%s unexpected_exception",
             agent_token,
-            *source_peername,
-            *destination.transport.get_extra_info('peername'),
+            direction,
+            format_peer(source_peername),
+            dest_peer,
         )
 
     finally:
         destination.close()
         await destination.wait_closed()
 
+    return total_bytes
 
-async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+
+async def handle_health(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     writer.write("💅 slaying and thriving, PERIOD.".encode())
     await writer.drain()
 
@@ -217,8 +298,8 @@ async def run_agent(
     try:
         ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
         proxy_reader, proxy_writer = await asyncio.open_connection(proxy_host, proxy_port, ssl=ssl_context)
-
-        logging.info("(%s) 🏃 ready!", token)
+        proxy_peername = writer_peer(proxy_writer)
+        logging.info("agent=%s state=connected proxy=%s ssl=%s", token, format_peer(proxy_peername), bool(use_ssl))
 
         proxy_writer.write(token.bytes)  # Send my identification
         await proxy_writer.drain()
@@ -227,17 +308,15 @@ async def run_agent(
 
         while True:
             data = await proxy_reader.read(7)
-            
+
             if data != b"ping":
                 break
 
             proxy_writer.write(b"pong")
             await proxy_writer.drain()
 
-            logging.debug("(%s) 🏓 ping-pong", token)
-
         if data != b"connect":
-            logging.error("(%s) 🥜 something went nuts", token)
+            logging.error("agent=%s handshake_failed payload=%r", token, data)
 
             proxy_writer.close()
 
@@ -249,7 +328,7 @@ async def run_agent(
 
             return
 
-        logging.debug("(%s) 💿 start forwarding", token)
+        logging.info("agent=%s bridge=preparing service=%s:%d", token, svc_host, svc_port)
 
         _, svc = await asyncio.gather(
             queue.put(1),  # Signal to spawn a new agent,
@@ -266,17 +345,32 @@ async def run_agent(
         proxy_peername = proxy_writer.transport.get_extra_info('peername')
 
         try:
-            await asyncio.gather(
+            bridge_started_at = time.monotonic()
+            proxy_to_service_bytes, service_to_proxy_bytes = await asyncio.gather(
                 forward(token, "proxy->service", proxy_peername, proxy_reader, svc_writer, forward_idle_timeout),
                 forward(token, "service->proxy", svc_peername, svc_reader, proxy_writer, forward_idle_timeout),
             )
 
-            logging.debug("(%s) 🏁 finished forwarding", token)
+            duration = time.monotonic() - bridge_started_at
+            logging.info(
+                (
+                    "agent=%s bridge=finished proxy=%s service=%s duration=%.2fs "
+                    "bytes_proxy_to_service=%d bytes_service_to_proxy=%d"
+                ),
+                token,
+                format_peer(proxy_peername),
+                format_peer(svc_peername),
+                duration,
+                proxy_to_service_bytes,
+                service_to_proxy_bytes,
+            )
 
         except Exception:
-            logging.error(
-                "(%s) 🛸 { proxy %s:%d <-> service %s:%d } Something crazy happened.",
-                token, *proxy_peername, *svc_peername
+            logging.exception(
+                "agent=%s bridge_error proxy=%s service=%s",
+                token,
+                format_peer(proxy_peername),
+                format_peer(svc_peername),
             )
 
             svc_writer.close()
@@ -289,15 +383,15 @@ async def run_agent(
             )
 
     except (OSError, asyncio.IncompleteReadError):
-        logging.error("(%s) 😭 connection error, retrying in %.2f sec(s)...", token, retry_delay_seconds)
+        logging.error("agent=%s connection_error retry_delay=%.2fs", token, retry_delay_seconds)
         await asyncio.sleep(retry_delay_seconds)
         await queue.put(1)  # Signal to spawn a new agent
 
-    except Exception as ex:
-        logging.error("(%s) ❌ exception: %s", token, ex)
+    except Exception:
+        logging.exception("agent=%s unexpected_exception", token)
 
     finally:
-        logging.info("(%s) 🪦 R.I.P", token)
+        logging.info("agent=%s state=closed", token)
 
         tasks = []
 
@@ -316,7 +410,7 @@ async def spawn_agents(queue: asyncio.Queue, *args):
     while True:
         await queue.get()  # Wait for a signal to spawn an agent
         token = uuid.uuid4()
-        logging.debug("(%s) 🤰 laboring a new agent", token)
+        logging.debug("agent=%s spawn_requested queue_depth=%d", token, queue.qsize())
         asyncio.create_task(run_agent(token, *args, queue))
 
 
@@ -336,7 +430,6 @@ async def shutdown(loop, health_server):
 
     await asyncio.gather(*tasks, return_exceptions=True)
     loop.call_soon(loop.stop)
-
 
 
 async def main():
