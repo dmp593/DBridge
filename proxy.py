@@ -161,6 +161,16 @@ def parse_bool(value: typing.Any, or_default: typing.Any | None = None) -> typin
                 return or_default
 
 
+def validate_idle_timeout(value):
+    try:
+        f_value = float(value)
+        if f_value < 0:
+            raise argparse.ArgumentTypeError("must be >= 0")
+        return f_value
+    except ValueError:
+        raise argparse.ArgumentTypeError("Invalid float value.")
+
+
 def validate_wait_agent_retry_interval(value):
     try:
         f_value = float(value)
@@ -222,6 +232,7 @@ def parse_args() -> argparse.Namespace:
     default_zombies_clean_interval=parse(to=float, value=os.getenv("ZOMBIES_CLEAN_INTERVAL"), or_default=0)
 
     default_ping_pong_interval_seconds = parse(to=float, value=os.getenv("PING_PONG_INTERVAL_SECONDS"), or_default=21)
+    default_forward_idle_timeout_seconds = parse(to=float, value=os.getenv("FORWARD_IDLE_TIMEOUT_SECONDS"), or_default=300.0)
 
     default_log_level = os.getenv("LOG_LEVEL", "INFO")
 
@@ -262,6 +273,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-u", "--ping-pong-interval", type=validate_ping_pong_interval, default=default_ping_pong_interval_seconds,
                         help=f"Interval (secs) to do a ping-pong to keep connection alive between the proxy and the agents. (Default: {default_ping_pong_interval_seconds:.2f})")
 
+    parser.add_argument("-f", "--forward-idle-timeout", type=validate_idle_timeout, default=default_forward_idle_timeout_seconds,
+                        help=(
+                            "Maximum seconds of inactivity allowed on a client<->service data stream before the proxy "
+                            "forces the connection closed. Set to 0 to disable (default: %.0fs)."
+                        ) % default_forward_idle_timeout_seconds)
+
     parser.add_argument("-v", "--log-level", type=validate_log_level, default=default_log_level,
                         help=f"Log Level (default: {default_log_level})")
 
@@ -276,16 +293,36 @@ def parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
-async def forward(agent_token: uuid.UUID, source_peername: tuple[str, int], source: asyncio.StreamReader, destination: asyncio.StreamWriter):
+async def forward(
+    agent_token: uuid.UUID,
+    direction: str,
+    source_peername: tuple[str, int],
+    source: asyncio.StreamReader,
+    destination: asyncio.StreamWriter,
+    idle_timeout: float,
+):
+    timeout_enabled = idle_timeout > 0
+
     try:
         while True:
-            data = await source.read(4096)
+            if timeout_enabled:
+                data = await asyncio.wait_for(source.read(4096), timeout=idle_timeout)
+            else:
+                data = await source.read(4096)
 
             if not data:
                 break
 
             destination.write(data)
             await destination.drain()
+    except asyncio.TimeoutError:
+        logging.warning(
+            "⏰ { (%s) %s source: %s:%d <-> destination: %s:%d } idle timeout",
+            agent_token,
+            direction,
+            *source_peername,
+            *destination.transport.get_extra_info('peername'),
+        )
     except asyncio.IncompleteReadError:
         logging.error(
             "😢 { (%s) source: %s:%d <-> destination: %s:%d } Unexpected EOF",
@@ -348,7 +385,14 @@ async def handle_agent(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     await context.add_agent(reader, writer, ping_pong_interval)
 
 
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allowed_hosts: list[str], wait_agent_max_tries: int, wait_agent_retry_interval: float):
+async def handle_client(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    allowed_hosts: list[str],
+    wait_agent_max_tries: int,
+    wait_agent_retry_interval: float,
+    forward_idle_timeout: float,
+):
     client_peername = writer.transport.get_extra_info('peername')
 
     if '*' not in allowed_hosts and client_peername[0] not in allowed_hosts:
@@ -405,10 +449,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
         await asyncio.gather(
             asyncio.create_task(
-                forward(agent.token, client_peername, reader, agent.writer)
+                forward(agent.token, "client->agent", client_peername, reader, agent.writer, forward_idle_timeout)
             ),
             asyncio.create_task(
-                forward(agent.token, agent_peername, agent.reader, writer)
+                forward(agent.token, "agent->client", agent_peername, agent.reader, writer, forward_idle_timeout)
             )
         )
 
@@ -487,7 +531,14 @@ async def main():
         ),
 
         asyncio.start_server(
-            lambda r, w: handle_client(r, w, args.allow_client, args.wait_agent_max_tries, args.wait_agent_retry_interval),
+            lambda r, w: handle_client(
+                r,
+                w,
+                args.allow_client,
+                args.wait_agent_max_tries,
+                args.wait_agent_retry_interval,
+                args.forward_idle_timeout,
+            ),
             args.host,
             args.port_clients,
             ssl=ssl_context
