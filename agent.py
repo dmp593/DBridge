@@ -382,31 +382,22 @@ async def run_agent(
                 return_exceptions=True
             )
 
-    except (
-        OSError,
-        ConnectionAbortedError,
-        ConnectionResetError,
-        asyncio.IncompleteReadError,
-        asyncio.TimeoutError,
-    ):
+    except Exception:
         logging.error("agent=%s connection_error retry_delay=%.2fs", token, retry_delay_seconds)
         await asyncio.sleep(retry_delay_seconds)
-        await queue.put(1)  # Signal to spawn a new agent
-
-    except Exception:
-        logging.exception("agent=%s unexpected_exception", token)
-        await queue.put(1)  # Signal to spawn a new agent
 
     finally:
         logging.info("agent=%s state=closed", token)
 
         if proxy_writer:
             proxy_writer.close()
-            await proxy_writer.wait_closed()
+            # await proxy_writer.wait_closed()
 
         if svc_writer:
             svc_writer.close()
-            await svc_writer.wait_closed()
+            # await svc_writer.wait_closed()
+
+        await queue.put(1)  # Signal to spawn a new agent
 
 
 async def spawn_agents(queue: asyncio.Queue, *args):
