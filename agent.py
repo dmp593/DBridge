@@ -382,7 +382,13 @@ async def run_agent(
                 return_exceptions=True
             )
 
-    except (OSError, asyncio.IncompleteReadError, asyncio.TimeoutError):
+    except (
+        OSError,
+        ConnectionAbortedError,
+        ConnectionResetError,
+        asyncio.IncompleteReadError,
+        asyncio.TimeoutError,
+    ):
         logging.error("agent=%s connection_error retry_delay=%.2fs", token, retry_delay_seconds)
         await asyncio.sleep(retry_delay_seconds)
         await queue.put(1)  # Signal to spawn a new agent
