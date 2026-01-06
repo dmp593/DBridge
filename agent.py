@@ -382,8 +382,8 @@ async def run_agent(
                 return_exceptions=True
             )
 
-    except Exception:
-        logging.error("agent=%s connection_error retry_delay=%.2fs", token, retry_delay_seconds)
+    except Exception as e:
+        logging.error("agent=%s connection_error exception=%r retry_delay=%.2fs", token, e, retry_delay_seconds)
         await asyncio.sleep(retry_delay_seconds)
 
     finally:
