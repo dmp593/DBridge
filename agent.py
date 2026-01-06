@@ -295,6 +295,8 @@ async def run_agent(
     proxy_writer = None
     svc_writer = None
 
+    new_agent_spawned = False
+
     try:
         ssl_context = ssl.create_default_context(cafile=cert) if use_ssl else None
         proxy_reader, proxy_writer = await asyncio.open_connection(proxy_host, proxy_port, ssl=ssl_context)
@@ -335,6 +337,8 @@ async def run_agent(
             asyncio.open_connection(svc_host, svc_port),
             return_exceptions=True
         )
+
+        new_agent_spawned = True
 
         svc_reader, svc_writer = svc
 
@@ -397,7 +401,8 @@ async def run_agent(
             svc_writer.close()
             # await svc_writer.wait_closed()
 
-        await queue.put(1)  # Signal to spawn a new agent
+        if not new_agent_spawned:
+            await queue.put(1)  # Signal to spawn a new agent
 
 
 async def spawn_agents(queue: asyncio.Queue, *args):
