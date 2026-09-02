@@ -1,0 +1,12 @@
+version: 2
+
+updates:
+  # Keeps SHA-pinned actions from going stale: Dependabot bumps the pin and
+  # rewrites the trailing version comment.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
