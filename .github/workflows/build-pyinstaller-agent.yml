@@ -1,0 +1,39 @@
+name: Build Windows EXE with PyInstaller
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * *"
+  push:
+    branches: ["main"]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Build EXE with PyInstaller (console)
+        run: |
+          pyinstaller --onefile --console agent.py
+
+      - name: Upload built EXE as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent.exe
+          path: dist/
